@@ -5,6 +5,7 @@ import { MapView } from "../map/MapView";
 import { FogLayer } from "../map/FogLayer";
 import { MenuPanel } from "./MenuPanel";
 import { ImportScreen } from "./ImportScreen";
+import { StravaImport } from "./StravaImport";
 import { supabase } from "../lib/supabase";
 import { DEFAULT_SETTINGS, H3_RES, type FogSettings } from "../lib/constants";
 import { cellFromIndex } from "../lib/h3";
@@ -30,6 +31,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
   const [loadError, setLoadError] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [stravaOpen, setStravaOpen] = useState(false);
 
   const mapRef = useRef<MlMap | null>(null);
   const fogRef = useRef<FogLayer | null>(null);
@@ -147,6 +149,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
           onPinRadius={changePinRadius}
           onDeletePin={deletePin}
           onOpenImport={() => setImportOpen(true)}
+          onOpenStrava={() => setStravaOpen(true)}
           onSignOut={() => supabase?.auth.signOut()}
           onClose={() => setMenuOpen(false)}
         />
@@ -154,6 +157,10 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
 
       {importOpen && (
         <ImportScreen userId={userId} onClose={() => setImportOpen(false)} onImported={onImported} />
+      )}
+
+      {stravaOpen && (
+        <StravaImport userId={userId} onClose={() => setStravaOpen(false)} onImported={onImported} />
       )}
 
       {usingSample && (

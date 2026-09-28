@@ -11,6 +11,7 @@ interface Props {
   onPinRadius: (id: string, radiusM: number) => void;
   onDeletePin: (id: string) => void;
   onOpenImport: () => void;
+  onOpenStrava: () => void;
   onSignOut: () => void;
   onClose: () => void;
 }
@@ -88,7 +89,8 @@ export function MenuPanel(p: Props) {
       <div className="section">
         <h3>Your travels</h3>
         <button className="btn block" onClick={p.onOpenImport}>Import Google Timeline</button>
-        <p className="hint" style={{ marginTop: 8 }}>Reveal everywhere your location history has been.</p>
+        <button className="btn block" style={{ marginTop: 8 }} onClick={p.onOpenStrava}>Import Strava</button>
+        <p className="hint" style={{ marginTop: 8 }}>Reveal everywhere your location history and activities have been.</p>
       </div>
 
       <div className="section">
