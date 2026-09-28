@@ -4,6 +4,9 @@ import { VitePWA } from "vite-plugin-pwa";
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  // GitHub Pages serves a project site under /<repo>/. The deploy workflow sets
+  // BASE_PATH=/FogOfWar/; local dev and root hosts use "/".
+  base: process.env.BASE_PATH || "/",
   plugins: [
     react(),
     VitePWA({

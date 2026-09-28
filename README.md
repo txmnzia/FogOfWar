@@ -66,23 +66,31 @@ which stores your data and syncs it between devices. Both Supabase values are
 Sign in with your email (magic link), then import your Timeline or drop a pin to
 start lifting the fog.
 
-## Deploy (Vercel)
+## Deploy (GitHub Pages)
 
-The app is a static PWA, so it hosts anywhere. Easiest is Vercel:
+This repo ships a workflow (`.github/workflows/deploy.yml`) that builds and
+publishes to GitHub Pages on every push. One-time setup:
 
-1. Go to [vercel.com](https://vercel.com) → **Continue with GitHub**.
-2. **Add New… → Project** → import this repo.
-3. If your code is on a branch (not `main`), set **Settings → Git → Production Branch**
-   to that branch.
-4. **Environment Variables** — add the same two as `.env`:
-   `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
-5. **Deploy.** You'll get a URL like `https://fog-of-war-xxx.vercel.app`.
-6. In Supabase → **Authentication → URL Configuration**, set the **Site URL** to that
-   URL and add `https://fog-of-war-xxx.vercel.app/**` to **Redirect URLs**, so magic
-   links come back to the right place.
+1. **Add your Supabase values as repository _Variables_** — they're public client
+   values, so Variables (not Secrets) are fine:
+   repo → **Settings → Secrets and variables → Actions → Variables → New repository
+   variable**, and add:
+   - `VITE_SUPABASE_URL` = `https://<your-project>.supabase.co`
+   - `VITE_SUPABASE_ANON_KEY` = `sb_publishable_…`
+2. **Enable Pages:** repo → **Settings → Pages → Build and deployment → Source:
+   GitHub Actions**.
+3. **Deploy:** push a commit (or repo → **Actions → Deploy to GitHub Pages → Run
+   workflow**). When it's green, the site is at `https://<you>.github.io/FogOfWar/`.
+4. **Point Supabase at it:** Authentication → URL Configuration → set **Site URL** to
+   `https://<you>.github.io/FogOfWar/` and add
+   `https://<you>.github.io/FogOfWar/**` to **Redirect URLs**.
 
-Then open the URL, sign in, and install it to your home screen (Share → Add to Home
-Screen on iOS; the install icon in the address bar on desktop).
+The base path (`/FogOfWar/`) is set via `BASE_PATH` in the workflow — update it if you
+rename the repo. Then open the URL, sign in, and install it to your home screen
+(iOS: Share → Add to Home Screen; desktop: the install icon in the address bar).
+
+Any static host works too; a `vercel.json` is included for Vercel (root path, no
+`BASE_PATH` needed).
 
 ## How to export your Google location data
 
