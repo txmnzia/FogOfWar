@@ -2,25 +2,25 @@ import type { Map as MlMap } from "maplibre-gl";
 import { CELL_EDGE_M, type FogSettings } from "../lib/constants";
 import type { Cell, Pin } from "../lib/types";
 
+// Explored marks never render smaller than this on screen, so they stay visible
+// (and keep a wide, soft glow) when zoomed right out.
+const MIN_FEATHER_CSS = 26;
+const FADE_RANGE_CSS = 150; // how much the "fade" setting widens the soft glow
+
 /**
  * Draws the fog as a canvas overlay synced to the map.
  *
- * The reveal is ONE smooth light field: we rasterise the union of every explored
- * cell (and pin) as solid discs, then Gaussian-blur the whole thing and subtract
- * it from a dark veil with `destination-out`. Because nothing hard is stamped
- * back, the light falls off continuously from the interior into the dark — there
- * is no visible boundary between "explored" and "fog", like a real RPG map.
- * Overlapping visits merge into one region, so ten visits look like one.
- *
- * `settings.fade` (0..1) sets how wide/gradual that falloff is; `settings.darkness`
- * (0..1) sets how dark the unexplored world stays.
+ * Each explored cell (and pin) erases the dark veil with a candlelight gradient:
+ * fully clear at its centre, then a LONG, gradual fade to nothing. So a single
+ * GPS point is fully bright at that spot, more points on the same spot can't make
+ * it brighter (already fully clear), and the edge is always a soft, progressive
+ * falloff — never a hard line. The fade width has a floor so explored areas stay
+ * a visible, glowing size at every zoom.
  */
 export class FogLayer {
   private map: MlMap;
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
-  private mask: HTMLCanvasElement;
-  private mctx: CanvasRenderingContext2D;
   private cells: Cell[] = [];
   private pins: Pin[] = [];
   private settings: FogSettings;
@@ -42,9 +42,6 @@ export class FogLayer {
     } as CSSStyleDeclaration);
     map.getCanvasContainer().appendChild(this.canvas);
     this.ctx = this.canvas.getContext("2d")!;
-
-    this.mask = document.createElement("canvas");
-    this.mctx = this.mask.getContext("2d")!;
 
     this.schedule = this.schedule.bind(this);
     map.on("move", this.schedule);
@@ -92,8 +89,6 @@ export class FogLayer {
     if (this.canvas.width !== mc.width || this.canvas.height !== mc.height) {
       this.canvas.width = mc.width;
       this.canvas.height = mc.height;
-      this.mask.width = mc.width;
-      this.mask.height = mc.height;
     }
     return mc.clientWidth > 0 ? mc.width / mc.clientWidth : 1;
   }
@@ -108,27 +103,40 @@ export class FogLayer {
     return (Math.hypot(p2.x - p1.x, p2.y - p1.y) / d) * scale;
   }
 
+  /** Candlelight erase at (x,y): fully clear to `coreR`, then a long gradual fade to `outer`. */
+  private punch(x: number, y: number, coreR: number, outer: number) {
+    const ctx = this.ctx;
+    const c = Math.min(0.9, coreR / outer);
+    const g = ctx.createRadialGradient(x, y, 0, x, y, outer);
+    g.addColorStop(0, "rgba(0,0,0,1)");
+    g.addColorStop(c, "rgba(0,0,0,1)");
+    // long, smooth candlelight falloff
+    g.addColorStop(c + (1 - c) * 0.25, "rgba(0,0,0,0.68)");
+    g.addColorStop(c + (1 - c) * 0.5, "rgba(0,0,0,0.36)");
+    g.addColorStop(c + (1 - c) * 0.75, "rgba(0,0,0,0.14)");
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(x, y, outer, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   private render() {
     const scale = this.resize();
     const W = this.canvas.width;
     const H = this.canvas.height;
     const ctx = this.ctx;
-    const mctx = this.mctx;
 
     const ppm = this.pixelsPerMeter(scale);
-    // Explored discs and the feather are both sized in the real world, so the
-    // lit geography is honest and — crucially — an explored region stays solid
-    // and bright at every zoom (the feather can't wash out its interior). The
-    // feather still gives a wide, gradual edge as you zoom in.
-    const discR = Math.max(1.2, CELL_EDGE_M * 1.18 * ppm);
-    const fadeM = this.settings.fade * 3500; // border-fade distance, metres
-    const featherPx = Math.min(300, Math.max(1, fadeM * ppm));
-    const margin = discR + featherPx + 4;
+    // A small fully-clear core (the cell itself), then a wide progressive glow.
+    const cellCore = Math.max(3 * scale, CELL_EDGE_M * 0.6 * ppm);
+    const featherPx = (MIN_FEATHER_CSS + this.settings.fade * FADE_RANGE_CSS) * scale;
+    const margin = cellCore + featherPx + 4;
 
-    // Cheap lat/lng pre-filter so we only draw what could touch the viewport.
+    // Cheap lat/lng pre-filter: convert the on-screen extent back to metres.
     const b = this.map.getBounds();
     const cLat = this.map.getCenter().lat;
-    const padM = fadeM + CELL_EDGE_M * 2;
+    const padM = (cellCore + featherPx) / Math.max(ppm, 1e-9) + CELL_EDGE_M * 2;
     const latPad = padM / 111320;
     const lngPad = latPad / Math.max(0.15, Math.cos((cLat * Math.PI) / 180));
     const west = b.getWest() - lngPad;
@@ -136,42 +144,31 @@ export class FogLayer {
     const south = b.getSouth() - latPad;
     const north = b.getNorth() + latPad;
 
-    // 1) Build the light field: union of explored discs, then blur it.
-    mctx.setTransform(1, 0, 0, 1, 0, 0);
-    mctx.globalCompositeOperation = "source-over";
-    mctx.clearRect(0, 0, W, H);
-    mctx.fillStyle = "#fff";
-    mctx.filter = featherPx > 0.5 ? `blur(${featherPx}px)` : "none";
-    mctx.beginPath();
+    // Dark veil over everything…
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = "source-over";
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = `rgba(20,14,7,${this.settings.darkness})`;
+    ctx.fillRect(0, 0, W, H);
+
+    // …then carve the candlelight out of it.
+    ctx.globalCompositeOperation = "destination-out";
     for (const cell of this.cells) {
       if (cell.lng < west || cell.lng > east || cell.lat < south || cell.lat > north) continue;
       const p = this.map.project([cell.lng, cell.lat]);
       const x = p.x * scale;
       const y = p.y * scale;
       if (x < -margin || x > W + margin || y < -margin || y > H + margin) continue;
-      mctx.moveTo(x + discR, y);
-      mctx.arc(x, y, discR, 0, Math.PI * 2);
+      this.punch(x, y, cellCore, cellCore + featherPx);
     }
     for (const pin of this.pins) {
       const p = this.map.project([pin.lng, pin.lat]);
       const x = p.x * scale;
       const y = p.y * scale;
-      const r = Math.max(discR, pin.radiusM * ppm);
-      if (x < -margin - r || x > W + margin + r || y < -margin - r || y > H + margin + r) continue;
-      mctx.moveTo(x + r, y);
-      mctx.arc(x, y, r, 0, Math.PI * 2);
+      const core = Math.max(cellCore, pin.radiusM * ppm);
+      if (x < -margin - core || x > W + margin + core || y < -margin - core || y > H + margin + core) continue;
+      this.punch(x, y, core, core + featherPx);
     }
-    mctx.fill();
-    mctx.filter = "none";
-
-    // 2) Dark veil, carved by the smooth field.
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalCompositeOperation = "source-over";
-    ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = `rgba(20,14,7,${this.settings.darkness})`;
-    ctx.fillRect(0, 0, W, H);
-    ctx.globalCompositeOperation = "destination-out";
-    ctx.drawImage(this.mask, 0, 0);
     ctx.globalCompositeOperation = "source-over";
   }
 }

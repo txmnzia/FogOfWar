@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - claude/rpg-world-exploration-map-mxluut
   workflow_dispatch:
 
 # Allow the workflow to publish to Pages.
