@@ -66,6 +66,24 @@ which stores your data and syncs it between devices. Both Supabase values are
 Sign in with your email (magic link), then import your Timeline or drop a pin to
 start lifting the fog.
 
+## Deploy (Vercel)
+
+The app is a static PWA, so it hosts anywhere. Easiest is Vercel:
+
+1. Go to [vercel.com](https://vercel.com) → **Continue with GitHub**.
+2. **Add New… → Project** → import this repo.
+3. If your code is on a branch (not `main`), set **Settings → Git → Production Branch**
+   to that branch.
+4. **Environment Variables** — add the same two as `.env`:
+   `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
+5. **Deploy.** You'll get a URL like `https://fog-of-war-xxx.vercel.app`.
+6. In Supabase → **Authentication → URL Configuration**, set the **Site URL** to that
+   URL and add `https://fog-of-war-xxx.vercel.app/**` to **Redirect URLs**, so magic
+   links come back to the right place.
+
+Then open the URL, sign in, and install it to your home screen (Share → Add to Home
+Screen on iOS; the install icon in the address bar on desktop).
+
 ## How to export your Google location data
 
 - **Phone (newest):** Google Maps app → your profile photo → *Your Timeline* →
