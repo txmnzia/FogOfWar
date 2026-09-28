@@ -30,7 +30,14 @@ export function MapView({ onReady, onClick }: Props) {
         zoom: DEFAULT_ZOOM,
         attributionControl: false,
         maxZoom: 18,
+        // Keep the map flat and north-up: a 2D exploration map has no use for
+        // rotation or tilt, and it lets the fog overlay place cells with a fast
+        // affine transform instead of a projection per vertex.
+        dragRotate: false,
+        pitchWithRotate: false,
+        touchPitch: false,
       });
+      map.touchZoomRotate.disableRotation();
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
       map.addControl(
         new maplibregl.AttributionControl({ compact: true, customAttribution: "© OpenFreeMap © OpenStreetMap" }),
