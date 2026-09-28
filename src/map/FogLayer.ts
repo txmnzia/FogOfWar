@@ -2,10 +2,13 @@ import type { Map as MlMap } from "maplibre-gl";
 import { CELL_EDGE_M, type FogSettings } from "../lib/constants";
 import type { Cell, Pin } from "../lib/types";
 
-// Explored marks never render smaller than this on screen, so they stay visible
-// (and keep a wide, soft glow) when zoomed right out.
-const MIN_FEATHER_CSS = 26;
-const FADE_RANGE_CSS = 150; // how much the "fade" setting widens the soft glow
+// Isolated points never render smaller than this on screen (so no "ant dots"),
+// but the size is otherwise real-world, so explored areas shrink naturally when
+// zoomed out and bigger hubs read as bigger bubbles.
+const MIN_CORE_CSS = 2.5;
+const FLOOR_FEATHER_CSS = 3;
+const FADE_MIN = 0.6; // fade=0 → tight halo
+const FADE_SPREAD = 2.6; // fade=1 → halo ~3x the core radius
 
 /**
  * Draws the fog as a canvas overlay synced to the map.
@@ -128,15 +131,20 @@ export class FogLayer {
     const ctx = this.ctx;
 
     const ppm = this.pixelsPerMeter(scale);
-    // A small fully-clear core (the cell itself), then a wide progressive glow.
-    const cellCore = Math.max(3 * scale, CELL_EDGE_M * 0.6 * ppm);
-    const featherPx = (MIN_FEATHER_CSS + this.settings.fade * FADE_RANGE_CSS) * scale;
-    const margin = cellCore + featherPx + 4;
+    // Real-world sized core (with a small screen floor), plus a soft edge that's
+    // proportional to the core — so the whole mark scales with zoom instead of
+    // staying a fixed huge blob.
+    const cellCore = Math.max(MIN_CORE_CSS * scale, CELL_EDGE_M * ppm);
+    const fadeFactor = FADE_MIN + this.settings.fade * FADE_SPREAD;
+    const floorFeather = FLOOR_FEATHER_CSS * scale;
+    const outerOf = (core: number) => core + core * fadeFactor + floorFeather;
+    const cellOuter = outerOf(cellCore);
+    const margin = cellOuter + 4;
 
     // Cheap lat/lng pre-filter: convert the on-screen extent back to metres.
     const b = this.map.getBounds();
     const cLat = this.map.getCenter().lat;
-    const padM = (cellCore + featherPx) / Math.max(ppm, 1e-9) + CELL_EDGE_M * 2;
+    const padM = cellOuter / Math.max(ppm, 1e-9) + CELL_EDGE_M * 2;
     const latPad = padM / 111320;
     const lngPad = latPad / Math.max(0.15, Math.cos((cLat * Math.PI) / 180));
     const west = b.getWest() - lngPad;
@@ -159,15 +167,16 @@ export class FogLayer {
       const x = p.x * scale;
       const y = p.y * scale;
       if (x < -margin || x > W + margin || y < -margin || y > H + margin) continue;
-      this.punch(x, y, cellCore, cellCore + featherPx);
+      this.punch(x, y, cellCore, cellOuter);
     }
     for (const pin of this.pins) {
       const p = this.map.project([pin.lng, pin.lat]);
       const x = p.x * scale;
       const y = p.y * scale;
       const core = Math.max(cellCore, pin.radiusM * ppm);
-      if (x < -margin - core || x > W + margin + core || y < -margin - core || y > H + margin + core) continue;
-      this.punch(x, y, core, core + featherPx);
+      const outer = outerOf(core);
+      if (x < -outer || x > W + outer || y < -outer || y > H + outer) continue;
+      this.punch(x, y, core, outer);
     }
     ctx.globalCompositeOperation = "source-over";
   }
