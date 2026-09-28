@@ -1,32 +1,48 @@
 import type { Map as MlMap } from "maplibre-gl";
-import { CELL_EDGE_M, type FogSettings } from "../lib/constants";
+import { cellToParent, cellToLatLng, getHexagonEdgeLengthAvg } from "h3-js";
+import { H3_RES, type FogSettings } from "../lib/constants";
 import type { Cell, Pin } from "../lib/types";
 
-// Isolated points never render smaller than this on screen (so no "ant dots"),
-// but the size is otherwise real-world, so explored areas shrink naturally when
-// zoomed out and bigger hubs read as bigger bubbles.
-const MIN_CORE_CSS = 2.5;
-const FLOOR_FEATHER_CSS = 3;
+// H3 resolutions we pre-aggregate to, finest → coarsest. When zoomed out we
+// draw a coarse level (few big cells) instead of every fine cell, so the number
+// of shapes drawn depends on the screen, not on how much history you have.
+const LADDER = [H3_RES, 8, 7, 6, 5, 4, 3, 2];
+// Aggregate to a coarser level once a cell would draw smaller than this (CSS px).
+const MIN_DRAW_CSS = 5;
+// Each cell's clear core is drawn a bit wider than its own radius so neighbours
+// overlap into a smooth region instead of a beaded chain of discs.
+const CORE_MULT = 1.45;
 const FADE_MIN = 0.6; // fade=0 → tight halo
 const FADE_SPREAD = 2.6; // fade=1 → halo ~3x the core radius
+const SPRITE_R = 128; // cached candlelight sprite radius (px)
+
+interface Level {
+  res: number;
+  edgeM: number;
+  /** Flat [lat, lng, lat, lng, …] of the (deduped) cell centres at this res. */
+  pts: Float64Array;
+}
 
 /**
- * Draws the fog as a canvas overlay synced to the map.
+ * Candlelight fog as a canvas overlay synced to the map.
  *
- * Each explored cell (and pin) erases the dark veil with a candlelight gradient:
- * fully clear at its centre, then a LONG, gradual fade to nothing. So a single
- * GPS point is fully bright at that spot, more points on the same spot can't make
- * it brighter (already fully clear), and the edge is always a soft, progressive
- * falloff — never a hard line. The fade width has a floor so explored areas stay
- * a visible, glowing size at every zoom.
+ * Per explored cell we blit a cached radial "candlelight" sprite with
+ * `destination-out`: fully clear at the centre, fading gently to the dark. A
+ * single visit is fully bright; overlaps can't exceed full clarity; the edge is
+ * always a soft progressive falloff. Cells are pre-aggregated into an H3 pyramid
+ * so a zoomed-out view draws a handful of coarse cells instead of tens of
+ * thousands — keeping pan/zoom smooth no matter how big the history is.
  */
 export class FogLayer {
   private map: MlMap;
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
-  private cells: Cell[] = [];
+  private sprite: HTMLCanvasElement;
+  private levels: Level[] = [];
+  private lastCells: Cell[] | null = null;
   private pins: Pin[] = [];
   private settings: FogSettings;
+  private spriteFade = -1;
   private raf = 0;
   private ro: ResizeObserver;
 
@@ -45,6 +61,8 @@ export class FogLayer {
     } as CSSStyleDeclaration);
     map.getCanvasContainer().appendChild(this.canvas);
     this.ctx = this.canvas.getContext("2d")!;
+    this.sprite = document.createElement("canvas");
+    this.sprite.width = this.sprite.height = SPRITE_R * 2;
 
     this.schedule = this.schedule.bind(this);
     map.on("move", this.schedule);
@@ -58,8 +76,13 @@ export class FogLayer {
   }
 
   setData(cells: Cell[], pins: Pin[]) {
-    this.cells = cells;
     this.pins = pins;
+    // Only rebuild the (relatively expensive) H3 pyramid when the cell set
+    // actually changes — not when just the pins change (e.g. dragging a radius).
+    if (cells !== this.lastCells) {
+      this.lastCells = cells;
+      this.buildPyramid(cells);
+    }
     this.schedule();
   }
 
@@ -77,6 +100,22 @@ export class FogLayer {
     this.canvas.remove();
   }
 
+  /** Aggregate the fine cells into deduped parent-cell centres at each level. */
+  private buildPyramid(cells: Cell[]) {
+    this.levels = LADDER.map((res) => {
+      const set = new Set<string>();
+      for (const c of cells) set.add(res === H3_RES ? c.h3 : cellToParent(c.h3, res));
+      const pts = new Float64Array(set.size * 2);
+      let i = 0;
+      for (const h3 of set) {
+        const [lat, lng] = cellToLatLng(h3);
+        pts[i++] = lat;
+        pts[i++] = lng;
+      }
+      return { res, edgeM: getHexagonEdgeLengthAvg(res, "m"), pts };
+    });
+  }
+
   private schedule() {
     if (this.raf) return;
     this.raf = requestAnimationFrame(() => {
@@ -85,8 +124,6 @@ export class FogLayer {
     });
   }
 
-  /** Match the overlay to the map's own backing canvas exactly. Returns the
-   *  device-pixels-per-CSS-pixel scale the map is using. */
   private resize(): number {
     const mc = this.map.getCanvas();
     if (this.canvas.width !== mc.width || this.canvas.height !== mc.height) {
@@ -96,7 +133,6 @@ export class FogLayer {
     return mc.clientWidth > 0 ? mc.width / mc.clientWidth : 1;
   }
 
-  /** Screen pixels (device) per real-world metre at the current view. */
   private pixelsPerMeter(scale: number): number {
     const c = this.map.getCenter();
     const d = 1000;
@@ -106,22 +142,23 @@ export class FogLayer {
     return (Math.hypot(p2.x - p1.x, p2.y - p1.y) / d) * scale;
   }
 
-  /** Candlelight erase at (x,y): fully clear to `coreR`, then a long gradual fade to `outer`. */
-  private punch(x: number, y: number, coreR: number, outer: number) {
-    const ctx = this.ctx;
-    const c = Math.min(0.9, coreR / outer);
-    const g = ctx.createRadialGradient(x, y, 0, x, y, outer);
-    g.addColorStop(0, "rgba(0,0,0,1)");
-    g.addColorStop(c, "rgba(0,0,0,1)");
-    // long, smooth candlelight falloff
-    g.addColorStop(c + (1 - c) * 0.25, "rgba(0,0,0,0.68)");
-    g.addColorStop(c + (1 - c) * 0.5, "rgba(0,0,0,0.36)");
-    g.addColorStop(c + (1 - c) * 0.75, "rgba(0,0,0,0.14)");
-    g.addColorStop(1, "rgba(0,0,0,0)");
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(x, y, outer, 0, Math.PI * 2);
-    ctx.fill();
+  /** Rebuild the cached candlelight sprite for the current fade setting. */
+  private buildSprite(fadeFactor: number) {
+    const c = 1 / (1 + fadeFactor); // fraction of the radius that is fully clear
+    const sctx = this.sprite.getContext("2d")!;
+    sctx.clearRect(0, 0, SPRITE_R * 2, SPRITE_R * 2);
+    const g = sctx.createRadialGradient(SPRITE_R, SPRITE_R, 0, SPRITE_R, SPRITE_R, SPRITE_R);
+    g.addColorStop(0, "rgba(255,255,255,1)");
+    g.addColorStop(c, "rgba(255,255,255,1)");
+    g.addColorStop(c + (1 - c) * 0.25, "rgba(255,255,255,0.68)");
+    g.addColorStop(c + (1 - c) * 0.5, "rgba(255,255,255,0.36)");
+    g.addColorStop(c + (1 - c) * 0.75, "rgba(255,255,255,0.14)");
+    g.addColorStop(1, "rgba(255,255,255,0)");
+    sctx.fillStyle = g;
+    sctx.beginPath();
+    sctx.arc(SPRITE_R, SPRITE_R, SPRITE_R, 0, Math.PI * 2);
+    sctx.fill();
+    this.spriteFade = fadeFactor;
   }
 
   private render() {
@@ -131,26 +168,8 @@ export class FogLayer {
     const ctx = this.ctx;
 
     const ppm = this.pixelsPerMeter(scale);
-    // Real-world sized core (with a small screen floor), plus a soft edge that's
-    // proportional to the core — so the whole mark scales with zoom instead of
-    // staying a fixed huge blob.
-    const cellCore = Math.max(MIN_CORE_CSS * scale, CELL_EDGE_M * ppm);
     const fadeFactor = FADE_MIN + this.settings.fade * FADE_SPREAD;
-    const floorFeather = FLOOR_FEATHER_CSS * scale;
-    const outerOf = (core: number) => core + core * fadeFactor + floorFeather;
-    const cellOuter = outerOf(cellCore);
-    const margin = cellOuter + 4;
-
-    // Cheap lat/lng pre-filter: convert the on-screen extent back to metres.
-    const b = this.map.getBounds();
-    const cLat = this.map.getCenter().lat;
-    const padM = cellOuter / Math.max(ppm, 1e-9) + CELL_EDGE_M * 2;
-    const latPad = padM / 111320;
-    const lngPad = latPad / Math.max(0.15, Math.cos((cLat * Math.PI) / 180));
-    const west = b.getWest() - lngPad;
-    const east = b.getEast() + lngPad;
-    const south = b.getSouth() - latPad;
-    const north = b.getNorth() + latPad;
+    if (fadeFactor !== this.spriteFade) this.buildSprite(fadeFactor);
 
     // Dark veil over everything…
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -158,26 +177,53 @@ export class FogLayer {
     ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = `rgba(20,14,7,${this.settings.darkness})`;
     ctx.fillRect(0, 0, W, H);
-
-    // …then carve the candlelight out of it.
     ctx.globalCompositeOperation = "destination-out";
-    for (const cell of this.cells) {
-      if (cell.lng < west || cell.lng > east || cell.lat < south || cell.lat > north) continue;
-      const p = this.map.project([cell.lng, cell.lat]);
-      const x = p.x * scale;
-      const y = p.y * scale;
-      if (x < -margin || x > W + margin || y < -margin || y > H + margin) continue;
-      this.punch(x, y, cellCore, cellOuter);
+
+    // …choose the coarsest-detail level whose cells are still ≥ MIN_DRAW on
+    // screen, so we draw few shapes when zoomed out.
+    const minPx = MIN_DRAW_CSS * scale;
+    const level =
+      this.levels.find((l) => l.edgeM * ppm >= minPx) ?? this.levels[this.levels.length - 1];
+
+    if (level && level.pts.length) {
+      const coreR = level.edgeM * ppm * CORE_MULT;
+      const outer = coreR * (1 + fadeFactor);
+      const margin = outer + 4;
+
+      const b = this.map.getBounds();
+      const cLat = this.map.getCenter().lat;
+      const latPad = outer / Math.max(ppm, 1e-9) / 111320 + level.edgeM / 111320;
+      const lngPad = latPad / Math.max(0.15, Math.cos((cLat * Math.PI) / 180));
+      const west = b.getWest() - lngPad;
+      const east = b.getEast() + lngPad;
+      const south = b.getSouth() - latPad;
+      const north = b.getNorth() + latPad;
+
+      const d = outer * 2;
+      const pts = level.pts;
+      for (let i = 0; i < pts.length; i += 2) {
+        const lat = pts[i];
+        const lng = pts[i + 1];
+        if (lng < west || lng > east || lat < south || lat > north) continue;
+        const p = this.map.project([lng, lat]);
+        const x = p.x * scale;
+        const y = p.y * scale;
+        if (x < -margin || x > W + margin || y < -margin || y > H + margin) continue;
+        ctx.drawImage(this.sprite, x - outer, y - outer, d, d);
+      }
     }
+
+    // Pins render at their own (larger) radius, always at full detail.
     for (const pin of this.pins) {
       const p = this.map.project([pin.lng, pin.lat]);
       const x = p.x * scale;
       const y = p.y * scale;
-      const core = Math.max(cellCore, pin.radiusM * ppm);
-      const outer = outerOf(core);
+      const core = Math.max(MIN_DRAW_CSS * scale, pin.radiusM * ppm);
+      const outer = core * (1 + fadeFactor);
       if (x < -outer || x > W + outer || y < -outer || y > H + outer) continue;
-      this.punch(x, y, core, outer);
+      ctx.drawImage(this.sprite, x - outer, y - outer, outer * 2, outer * 2);
     }
+
     ctx.globalCompositeOperation = "source-over";
   }
 }
