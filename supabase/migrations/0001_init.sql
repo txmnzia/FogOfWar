@@ -41,8 +41,8 @@ create policy "own pins" on public.pins
 -- ---------------------------------------------------------------------------
 create table if not exists public.settings (
   user_id    uuid        primary key default auth.uid() references auth.users on delete cascade,
-  darkness   double precision not null default 0.72,
-  reach_m    double precision not null default 450,
+  darkness   double precision not null default 0.88,
+  fade       double precision not null default 0.45,
   updated_at timestamptz not null default now()
 );
 

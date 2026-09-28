@@ -97,17 +97,17 @@ export async function fetchSettings(): Promise<FogSettings> {
   const db = client();
   const { data, error } = await db
     .from("settings")
-    .select("darkness,reach_m")
+    .select("darkness,fade")
     .maybeSingle();
   if (error) throw error;
   if (!data) return { ...DEFAULT_SETTINGS };
-  return { darkness: data.darkness, reachM: data.reach_m };
+  return { darkness: data.darkness, fade: data.fade };
 }
 
 export async function saveSettings(userId: string, s: FogSettings): Promise<void> {
   const db = client();
   const { error } = await db
     .from("settings")
-    .upsert({ user_id: userId, darkness: s.darkness, reach_m: s.reachM }, { onConflict: "user_id" });
+    .upsert({ user_id: userId, darkness: s.darkness, fade: s.fade }, { onConflict: "user_id" });
   if (error) throw error;
 }

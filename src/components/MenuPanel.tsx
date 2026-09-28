@@ -42,17 +42,17 @@ export function MenuPanel(p: Props) {
           />
         </div>
         <div className="slider">
-          <label>Candle reach <b>{fmtDist(settings.reachM)}</b></label>
+          <label>Border fade <b>{Math.round(settings.fade * 100)}</b></label>
           <input
             type="range"
-            min={SETTINGS_BOUNDS.reachM.min}
-            max={SETTINGS_BOUNDS.reachM.max}
-            step={SETTINGS_BOUNDS.reachM.step}
-            value={settings.reachM}
-            onChange={(e) => p.onSettings({ ...settings, reachM: +e.target.value })}
+            min={SETTINGS_BOUNDS.fade.min}
+            max={SETTINGS_BOUNDS.fade.max}
+            step={SETTINGS_BOUNDS.fade.step}
+            value={settings.fade}
+            onChange={(e) => p.onSettings({ ...settings, fade: +e.target.value })}
           />
         </div>
-        <p className="hint">How dark the unknown stays, and how far each explored place glows before it fades.</p>
+        <p className="hint">How dark the unknown stays, and how gradually your explored land dissolves into it — no hard edge.</p>
       </div>
 
       <div className="section">

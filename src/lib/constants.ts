@@ -15,16 +15,16 @@ export const DEFAULT_ZOOM = 5;
 export interface FogSettings {
   /** Opacity of the veil over unexplored world, 0..1. */
   darkness: number;
-  /** How far candlelight bleeds past explored land, in metres. */
-  reachM: number;
+  /** How gradual the explored→fog falloff is, 0..1 (higher = wider, softer). */
+  fade: number;
 }
 
 export const DEFAULT_SETTINGS: FogSettings = {
-  darkness: 0.72,
-  reachM: 450,
+  darkness: 0.88,
+  fade: 0.45,
 };
 
 export const SETTINGS_BOUNDS = {
-  darkness: { min: 0.35, max: 0.9, step: 0.01 },
-  reachM: { min: 100, max: 2500, step: 25 },
+  darkness: { min: 0.4, max: 0.95, step: 0.01 },
+  fade: { min: 0, max: 1, step: 0.01 },
 };
