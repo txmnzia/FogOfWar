@@ -30,15 +30,20 @@ gamification stats (% of the world lit, countries unlocked).
 ## Tech
 
 - **React + Vite + TypeScript**, PWA via `vite-plugin-pwa`
-- **MapLibre GL** with a custom parchment style over **MapTiler** vector tiles
+- **MapLibre GL** with a custom parchment style over **OpenFreeMap** vector tiles
+  (free, keyless OpenStreetMap tiles — no API key, no signup)
+- Place search via **Nominatim** (keyless)
 - Candlelight fog as a 2D-canvas overlay synced to the map (`src/map/FogLayer.ts`)
 - **H3** hexagon grid for the binary explored set (`src/lib/h3.ts`)
-- **Supabase** (Postgres + row-level security + magic-link auth) for storage
+- **Supabase** (Postgres + row-level security + magic-link auth) for storage and
+  cross-device sync
 
 ## Setup
 
-You need two free accounts. All keys used here are *public* client keys (they ship
-to the browser) — never put a Supabase `service_role` key in the frontend.
+The map and place search are keyless. The only thing to configure is Supabase,
+which stores your data and syncs it between devices. Both Supabase values are
+*public* client keys (they ship to the browser) — never put a Supabase
+`service_role` key in the frontend.
 
 1. **Install**
    ```bash
@@ -46,16 +51,13 @@ to the browser) — never put a Supabase `service_role` key in the frontend.
    cp .env.example .env
    ```
 
-2. **MapTiler** — create a key at <https://cloud.maptiler.com/account/keys/> and put
-   it in `VITE_MAPTILER_KEY`. Powers the map tiles and place-name search.
-
-3. **Supabase** — create a project at <https://supabase.com/dashboard>, then
+2. **Supabase** — create a project at <https://supabase.com/dashboard>, then
    Settings → API. Put the Project URL in `VITE_SUPABASE_URL` and the `anon public`
    key in `VITE_SUPABASE_ANON_KEY`. Finally, open the SQL editor and run
    [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql) once to
    create the tables (they're locked to your account via row-level security).
 
-4. **Run**
+3. **Run**
    ```bash
    npm run dev      # http://localhost:5173
    npm run build    # production build + service worker

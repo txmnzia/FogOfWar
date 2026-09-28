@@ -23,14 +23,14 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // Cache MapTiler tiles so previously-seen areas work offline.
+        // Cache OpenFreeMap tiles + fonts so previously-seen areas work offline.
         runtimeCaching: [
           {
-            urlPattern: /^https:\/\/api\.maptiler\.com\/.*/i,
+            urlPattern: /^https:\/\/tiles\.openfreemap\.org\/.*/i,
             handler: "CacheFirst",
             options: {
-              cacheName: "maptiler",
-              expiration: { maxEntries: 1000, maxAgeSeconds: 60 * 60 * 24 * 30 },
+              cacheName: "openfreemap",
+              expiration: { maxEntries: 2000, maxAgeSeconds: 60 * 60 * 24 * 30 },
               cacheableResponse: { statuses: [0, 200] },
             },
           },
