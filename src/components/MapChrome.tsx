@@ -15,9 +15,22 @@ const GRAIN =
      </svg>`,
   );
 
+// A larger, soft low-frequency blotch — the uneven light/dark of aged parchment.
+const MOTTLE =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    `<svg xmlns='http://www.w3.org/2000/svg' width='420' height='420'>
+       <filter id='m'><feTurbulence type='fractalNoise' baseFrequency='0.016' numOctaves='4' seed='7' stitchTiles='stitch'/>
+       <feColorMatrix type='saturate' values='0'/></filter>
+       <rect width='100%' height='100%' filter='url(#m)'/>
+     </svg>`,
+  );
+
 export function MapChrome() {
   return (
     <div className="chrome" aria-hidden="true">
+      <div className="chrome-paper" />
+      <div className="chrome-mottle" style={{ backgroundImage: `url("${MOTTLE}")` }} />
       <div className="chrome-grain" style={{ backgroundImage: `url("${GRAIN}")` }} />
       <div className="chrome-vignette" />
       <div className="chrome-frame" />

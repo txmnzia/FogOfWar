@@ -200,10 +200,22 @@ input[type="range"]::-moz-range-thumb {
 
 /* ---- map chrome (decorative overlay) ---- */
 .chrome { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+/* A faint warm wash that pulls the whole map toward aged parchment. */
+.chrome-paper {
+  position: absolute; inset: 0;
+  background: rgba(196, 150, 86, 0.10);
+  mix-blend-mode: soft-light;
+}
+/* Soft blotchy light/dark variation of old paper. */
+.chrome-mottle {
+  position: absolute; inset: 0;
+  background-repeat: repeat; background-size: 420px 420px;
+  mix-blend-mode: multiply; opacity: 0.10;
+}
 .chrome-grain {
   position: absolute; inset: 0;
   background-repeat: repeat; background-size: 180px 180px;
-  mix-blend-mode: multiply; opacity: 0.09;
+  mix-blend-mode: multiply; opacity: 0.08;
 }
 .chrome-vignette {
   position: absolute; inset: 0;
