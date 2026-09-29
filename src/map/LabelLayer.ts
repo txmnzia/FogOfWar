@@ -31,6 +31,24 @@ function kindFor(cls: string): Kind | null {
   }
 }
 
+// Label size grows with zoom so a country name isn't huge at world view. Values
+// are px; each kind only renders within its own zoom window (see visibleAt).
+function sizeFor(kind: Kind, z: number): number {
+  const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
+  switch (kind) {
+    case "country":
+      return clamp(8.5 + (z - 2) * 2.2, 8.5, 18);
+    case "region":
+      return clamp(9 + (z - 3.5) * 1.5, 9, 14);
+    case "city":
+      return clamp(12 + (z - 5) * 0.7, 12, 16);
+    case "town":
+      return clamp(10 + (z - 8.5) * 0.6, 10, 13);
+    case "water":
+      return clamp(10 + (z - 6) * 0.6, 10, 15);
+  }
+}
+
 function visibleAt(kind: Kind, z: number): boolean {
   switch (kind) {
     case "country":
@@ -50,6 +68,7 @@ interface Item {
   el: HTMLDivElement;
   lng: number;
   lat: number;
+  kind: Kind;
 }
 
 export class LabelLayer {
@@ -150,7 +169,7 @@ export class LabelLayer {
       el.className = "maplabel " + it.kind;
       el.textContent = it.name;
       this.root.appendChild(el);
-      return { el, lng: it.lng, lat: it.lat };
+      return { el, lng: it.lng, lat: it.lat, kind: it.kind };
     });
     this.reposition();
   }
@@ -159,6 +178,7 @@ export class LabelLayer {
     const c = this.map.getCanvas();
     const W = c.clientWidth;
     const H = c.clientHeight;
+    const z = this.map.getZoom();
     for (const it of this.items) {
       const pt = this.map.project([it.lng, it.lat]);
       if (pt.x < -80 || pt.x > W + 80 || pt.y < -40 || pt.y > H + 40) {
@@ -166,6 +186,7 @@ export class LabelLayer {
         continue;
       }
       it.el.style.display = "";
+      it.el.style.fontSize = sizeFor(it.kind, z).toFixed(1) + "px";
       it.el.style.transform = `translate(${pt.x}px, ${pt.y}px) translate(-50%, -50%)`;
     }
   }
