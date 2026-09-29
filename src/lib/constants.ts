@@ -31,5 +31,5 @@ export const DEFAULT_SETTINGS: FogSettings = {
 export const SETTINGS_BOUNDS = {
   darkness: { min: 0.4, max: 0.95, step: 0.01 },
   fade: { min: 0, max: 1, step: 0.01 },
-  generosity: { min: 0, max: 1, step: 0.02 },
+  generosity: { min: -1, max: 1, step: 0.02 },
 };

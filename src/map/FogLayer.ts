@@ -362,7 +362,7 @@ export class FogLayer {
       //    coarse cell's size, so it stays a modest dot rather than a whole region.
       // Zoomed in, the footprint wins; zoomed out, the mark wins — both covered.
       const fullR = (edgePx * this.tuning.discR) / MASK_DOWNSCALE;
-      const g = Math.max(0, Math.min(1, this.settings.generosity ?? 0.65));
+      const g = Math.max(-1, Math.min(1, this.settings.generosity ?? 0.65));
       // Min mark = a blur-survival floor (so it's visible at all) PLUS a
       // generosity-driven amount. Adding rather than max()-ing means generosity
       // moves the dot size across its whole range instead of being swamped by the
