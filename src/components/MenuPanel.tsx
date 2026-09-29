@@ -53,7 +53,18 @@ export function MenuPanel(p: Props) {
             onChange={(e) => p.onSettings({ ...settings, fade: +e.target.value })}
           />
         </div>
-        <p className="hint">How dark the unknown stays, and how gradually your explored land dissolves into it — no hard edge.</p>
+        <div className="slider">
+          <label>Low-zoom coverage <b>{Math.round(settings.generosity * 100)}</b></label>
+          <input
+            type="range"
+            min={SETTINGS_BOUNDS.generosity.min}
+            max={SETTINGS_BOUNDS.generosity.max}
+            step={SETTINGS_BOUNDS.generosity.step}
+            value={settings.generosity}
+            onChange={(e) => p.onSettings({ ...settings, generosity: +e.target.value })}
+          />
+        </div>
+        <p className="hint">How dark the unknown stays, and how gradually your explored land dissolves into it. Low-zoom coverage sets how boldly explored spots show when zoomed right out — lower is truer to your footprint, higher keeps them visible at continent scale.</p>
       </div>
 
       <div className="section">

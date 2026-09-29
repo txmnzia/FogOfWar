@@ -93,6 +93,25 @@ export async function removePin(id: string): Promise<void> {
   if (error) throw error;
 }
 
+// `generosity` is a per-device display preference kept in localStorage, so it
+// needs no column in the shared `settings` table (no SQL migration to run).
+const GEN_KEY = "fow.generosity";
+function readGenerosity(): number {
+  try {
+    const v = parseFloat(localStorage.getItem(GEN_KEY) ?? "");
+    return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : DEFAULT_SETTINGS.generosity;
+  } catch {
+    return DEFAULT_SETTINGS.generosity;
+  }
+}
+function writeGenerosity(v: number) {
+  try {
+    localStorage.setItem(GEN_KEY, String(v));
+  } catch {
+    /* ignore */
+  }
+}
+
 export async function fetchSettings(): Promise<FogSettings> {
   const db = client();
   const { data, error } = await db
@@ -100,11 +119,13 @@ export async function fetchSettings(): Promise<FogSettings> {
     .select("darkness,fade")
     .maybeSingle();
   if (error) throw error;
-  if (!data) return { ...DEFAULT_SETTINGS };
-  return { darkness: data.darkness, fade: data.fade };
+  const generosity = readGenerosity();
+  if (!data) return { ...DEFAULT_SETTINGS, generosity };
+  return { darkness: data.darkness, fade: data.fade, generosity };
 }
 
 export async function saveSettings(userId: string, s: FogSettings): Promise<void> {
+  writeGenerosity(s.generosity);
   const db = client();
   const { error } = await db
     .from("settings")
