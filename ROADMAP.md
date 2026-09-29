@@ -7,7 +7,7 @@ session can resume without re-deriving the plan.
 
 ## Status
 
-- **Workstream 1 — Map revamp:** ✅ **Shipped & live.**
+- **Workstream 1 — Map revamp:** ✅ **Shipped & live** (+ engraved labels & warm relief).
 - **Workstream 2 — RPG gamification:** 📋 **Spec locked, paused.**
 - **Current focus:** further map improvements before starting Workstream 2.
 
@@ -77,13 +77,21 @@ DRIFT_SPEED = 1.4
 - **Fog Reveal Studio** (live tuner): https://claude.ai/artifact/XaudXo8KmhHcthxDGZ1UZg
   — sliders map 1:1 to the constants above; copy values → bake into the app.
 
-### Parked / deferred from WS1
+### Map polish shipped after WS1
 
-- **Hillshade relief** under the paint — prettier, but adds a terrain-tile
-  dependency. Parked fork.
-- **Hand-lettered fonts _in_ the map** (Cinzel/IM Fell on tiles) — MapLibre needs
-  pre-baked glyph PBFs; deferred and folded into WS2 realm labels (rendered as our
-  own overlay for full font control). Chrome compass/frame already use those faces.
+- **Engraved labels** ✅ — place + water names render as a styled overlay in
+  Cinzel (places) / IM Fell italic (water), below the fog so they reveal with
+  exploration. MapLibre's plain glyph labels removed. Zoom-gated, deduped, capped.
+  _File: `src/map/LabelLayer.ts` + `.maplabel` styles in `src/index.css`; fonts in
+  `index.html`._ This is also the WS2 realm-label system.
+- **Warm shaded relief (hillshade)** ✅ — real mountains/valleys from free
+  Terrarium elevation tiles (`terrainDem` raster-dem source), tinted warm to read
+  like a hand-shaded map. Map stays flat (no tilt); fog engine unaffected. Tunable
+  via the `hillshade` layer paint in `src/map/parchmentStyle.ts`.
+
+### Still parked
+
+- (none from WS1 right now)
 
 ---
 
