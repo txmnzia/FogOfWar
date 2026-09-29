@@ -126,6 +126,19 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
     await removePin(id).catch(() => {});
   }
 
+  function exportCells() {
+    const ids = cells.map((c) => c.h3);
+    const blob = new Blob([JSON.stringify(ids)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "fogofwar-cells.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   function onImported(indexes: string[]) {
     setCells((prev) => {
       const seen = new Set(prev.map((c) => c.h3));
@@ -163,6 +176,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
           onDeletePin={deletePin}
           onOpenImport={() => setImportOpen(true)}
           onOpenStrava={() => setStravaOpen(true)}
+          onExport={exportCells}
           onSignOut={() => supabase?.auth.signOut()}
           onClose={() => setMenuOpen(false)}
         />
