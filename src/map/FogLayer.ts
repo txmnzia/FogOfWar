@@ -1,4 +1,4 @@
-import type { Map as MlMap } from "maplibre-gl";
+import type { Map as MlMap, MapGeoJSONFeature } from "maplibre-gl";
 import { cellToParent, cellToLatLng, getHexagonEdgeLengthAvg } from "h3-js";
 import { H3_RES, type FogSettings } from "../lib/constants";
 import type { Cell, Pin } from "../lib/types";
@@ -51,6 +51,11 @@ const HALO_ALPHA = 0.35;
 // smooth, organic shapes with no hexagon steps, and a thin route stays connected.
 const DISC_R = 1.25;
 
+// Open water is revealed for orientation, but a fog band is kept hugging every
+// coast so the coastline itself is still earned by exploring. The band width is
+// in CSS px — a consistent visual margin at any zoom.
+const WATER_MARGIN_CSS = 16;
+
 interface Level {
   res: number;
   edgeM: number;
@@ -92,6 +97,11 @@ export class FogLayer {
   private rctx: CanvasRenderingContext2D;
   private veil: HTMLCanvasElement;
   private vctx: CanvasRenderingContext2D;
+  private wrev: HTMLCanvasElement;
+  private wctx: CanvasRenderingContext2D;
+  private wtmp: HTMLCanvasElement;
+  private wtctx: CanvasRenderingContext2D;
+  private srcName: string | null = null;
   private levels: Level[] = [];
   private lastCells: Cell[] | null = null;
   private pins: Pin[] = [];
@@ -127,6 +137,10 @@ export class FogLayer {
     this.rctx = this.reveal.getContext("2d")!;
     this.veil = document.createElement("canvas");
     this.vctx = this.veil.getContext("2d")!;
+    this.wrev = document.createElement("canvas");
+    this.wctx = this.wrev.getContext("2d")!;
+    this.wtmp = document.createElement("canvas");
+    this.wtctx = this.wtmp.getContext("2d")!;
 
     this.schedule = this.schedule.bind(this);
     this.driftTick = this.driftTick.bind(this);
@@ -208,6 +222,10 @@ export class FogLayer {
       this.mask.height = fh;
       this.reveal.width = fw;
       this.reveal.height = fh;
+      this.wrev.width = fw;
+      this.wrev.height = fh;
+      this.wtmp.width = fw;
+      this.wtmp.height = fh;
       this.buildVeil(fw, fh);
     }
     return mc.clientWidth > 0 ? mc.width / mc.clientWidth : 1;
@@ -284,18 +302,20 @@ export class FogLayer {
     mctx.clearRect(0, 0, fw, fh);
     mctx.fillStyle = "#fff";
 
-    if (level && level.centers.length) {
-      const c = this.map.getCenter();
-      const [m0x, m0y] = lngLatToMerc(c.lng, c.lat);
-      const dxDeg = 0.05;
-      const [m1x, m1y] = lngLatToMerc(c.lng + dxDeg, c.lat + dxDeg);
-      const p0 = this.map.project([c.lng, c.lat]);
-      const p1 = this.map.project([c.lng + dxDeg, c.lat + dxDeg]);
-      const ax = ((p1.x - p0.x) / (m1x - m0x)) * ms;
-      const ay = ((p1.y - p0.y) / (m1y - m0y)) * ms;
-      const bx = p0.x * ms - ax * m0x;
-      const by = p0.y * ms - ay * m0y;
+    // Affine mercator→mask transform (depends only on the map view, not the
+    // data). Used for both explored cells and the water polygons.
+    const c = this.map.getCenter();
+    const [m0x, m0y] = lngLatToMerc(c.lng, c.lat);
+    const dxDeg = 0.05;
+    const [m1x, m1y] = lngLatToMerc(c.lng + dxDeg, c.lat + dxDeg);
+    const p0 = this.map.project([c.lng, c.lat]);
+    const p1 = this.map.project([c.lng + dxDeg, c.lat + dxDeg]);
+    const ax = ((p1.x - p0.x) / (m1x - m0x)) * ms;
+    const ay = ((p1.y - p0.y) / (m1y - m0y)) * ms;
+    const bx = p0.x * ms - ax * m0x;
+    const by = p0.y * ms - ay * m0y;
 
+    if (level && level.centers.length) {
       const r = Math.max(minPx * DISC_R, edgePx * DISC_R) / MASK_DOWNSCALE;
 
       const b = this.map.getBounds();
@@ -350,7 +370,12 @@ export class FogLayer {
     rctx.filter = "none";
     rctx.globalAlpha = 1;
 
-    // ---- 3. Composite the cloud veil with the reveal cut out.
+    // ---- 2b. Water: reveal open sea, eroded inward from every coast by a margin.
+    const src = this.vectorSource();
+    if (src) this.buildWaterReveal(src, ax, ay, bx, by, WATER_MARGIN_CSS * ms);
+    else this.clearWater();
+
+    // ---- 3. Composite the cloud veil with the reveals cut out.
     this.composite(this.reduce ? 0 : performance.now());
     void ctx;
   }
@@ -378,8 +403,9 @@ export class FogLayer {
     fctx.globalAlpha = density;
     fctx.drawImage(this.veil, -VEIL_MARGIN + dx, -VEIL_MARGIN + dy);
     fctx.globalAlpha = 1;
-    // Lift the clouds over everywhere you've explored.
+    // Lift the clouds over the open sea, then over everywhere you've explored.
     fctx.globalCompositeOperation = "destination-out";
+    fctx.drawImage(this.wrev, 0, 0);
     fctx.drawImage(this.reveal, 0, 0);
     fctx.globalCompositeOperation = "source-over";
 
@@ -403,6 +429,119 @@ export class FogLayer {
     if (typeof document !== "undefined" && document.hidden) return;
     // Only the veil offset changes; the reveal + mask are reused as-is.
     this.composite(t);
+  }
+
+  private vectorSource(): string | null {
+    if (this.srcName) return this.srcName;
+    const s = this.map.getStyle()?.sources ?? {};
+    this.srcName =
+      Object.keys(s).find((k) => (s as Record<string, { type?: string }>)[k]?.type === "vector") ??
+      null;
+    return this.srcName;
+  }
+
+  private clearWater() {
+    this.wctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.wctx.clearRect(0, 0, this.wrev.width, this.wrev.height);
+  }
+
+  /** Reveal open water, eroded inward from every coast by `marginPx` (mask px). */
+  private buildWaterReveal(
+    src: string,
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number,
+    marginPx: number,
+  ) {
+    const fw = this.wtmp.width;
+    const fh = this.wtmp.height;
+    const wt = this.wtctx;
+    const wr = this.wctx;
+
+    let feats: MapGeoJSONFeature[];
+    try {
+      feats = this.map.querySourceFeatures(src, { sourceLayer: "water" });
+    } catch {
+      this.clearWater();
+      return;
+    }
+    if (!feats.length) {
+      this.clearWater();
+      return;
+    }
+
+    // 1. Union of all water, filled seamlessly. Filling every tile's polygons
+    // makes tile seams vanish in the raster, so only real coasts remain as edges.
+    wt.setTransform(1, 0, 0, 1, 0, 0);
+    wt.globalCompositeOperation = "source-over";
+    wt.filter = "none";
+    wt.globalAlpha = 1;
+    wt.clearRect(0, 0, fw, fh);
+    wt.fillStyle = "#fff";
+    for (const f of feats) {
+      const g = f.geometry;
+      if (g.type === "Polygon") {
+        wt.beginPath();
+        this.addRings(wt, g.coordinates, ax, ay, bx, by);
+        wt.fill("evenodd");
+      } else if (g.type === "MultiPolygon") {
+        for (const poly of g.coordinates) {
+          wt.beginPath();
+          this.addRings(wt, poly, ax, ay, bx, by);
+          wt.fill("evenodd");
+        }
+      }
+    }
+
+    // 2. Erode inward by the coast margin: intersect the fill with 8 shifted
+    // copies of itself (a cheap morphological erosion). Because the fill is a
+    // seamless union, this only bites at real coasts, not at tile boundaries.
+    wr.setTransform(1, 0, 0, 1, 0, 0);
+    wr.globalCompositeOperation = "source-over";
+    wr.filter = "none";
+    wr.globalAlpha = 1;
+    wr.clearRect(0, 0, fw, fh);
+    wr.drawImage(this.wtmp, 0, 0);
+    const m = marginPx;
+    const d = m * 0.7071;
+    const offs: Array<[number, number]> = [
+      [m, 0],
+      [-m, 0],
+      [0, m],
+      [0, -m],
+      [d, d],
+      [d, -d],
+      [-d, d],
+      [-d, -d],
+    ];
+    wr.globalCompositeOperation = "destination-in";
+    for (const [ox, oy] of offs) wr.drawImage(this.wtmp, ox, oy);
+    wr.globalCompositeOperation = "source-over";
+  }
+
+  private addRings(
+    ctx: CanvasRenderingContext2D,
+    rings: number[][][],
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number,
+  ) {
+    for (const ring of rings) {
+      for (let i = 0; i < ring.length; i++) {
+        const lng = ring[i][0];
+        const lat = ring[i][1];
+        const s = Math.sin((lat * Math.PI) / 180);
+        const mx = (180 + lng) / 360;
+        const my = 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI);
+        const x = ax * mx + bx;
+        const y = ay * my + by;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+    }
   }
 }
 
