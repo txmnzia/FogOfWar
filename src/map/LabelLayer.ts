@@ -1,4 +1,5 @@
 import type { Map as MlMap, MapGeoJSONFeature } from "maplibre-gl";
+import type { FogLayer } from "./FogLayer";
 import { crestSvg } from "../lib/crest";
 
 // A styled label overlay. MapLibre's native labels need pre-baked glyph fonts, so
@@ -78,6 +79,7 @@ const REALM_KINDS = new Set<Kind>(["country", "region", "city"]);
 
 export class LabelLayer {
   private map: MlMap;
+  private fog: FogLayer | null;
   private root: HTMLDivElement;
   private items: Item[] = [];
   private srcName: string | null = null;
@@ -97,8 +99,9 @@ export class LabelLayer {
     this.rebuildTimer = window.setTimeout(() => this.rebuild(), 250);
   };
 
-  constructor(map: MlMap) {
+  constructor(map: MlMap, fog: FogLayer | null = null) {
     this.map = map;
+    this.fog = fog;
     this.root = document.createElement("div");
     this.root.className = "maplabels";
     map.getCanvasContainer().appendChild(this.root);
@@ -106,6 +109,11 @@ export class LabelLayer {
     map.on("moveend", this.onSettle);
     map.on("zoomend", this.onSettle);
     map.on("sourcedata", this.onSourceData);
+    this.rebuild();
+  }
+
+  /** Re-evaluate labels (e.g. after explored data changes). */
+  refresh() {
     this.rebuild();
   }
 
@@ -169,7 +177,11 @@ export class LabelLayer {
     const list = [...chosen.values()].sort((a, b) => a.rank - b.rank).slice(0, MAX_LABELS);
 
     this.root.textContent = "";
-    this.items = list.map((it) => {
+    this.items = [];
+    for (const it of list) {
+      // Labels sit above the clouds now, so only show ones over explored (or
+      // open-sea) ground — otherwise unexplored place names would float on the fog.
+      if (this.fog && !this.fog.isRevealed(it.lng, it.lat)) continue;
       const el = document.createElement("div");
       el.className = "maplabel " + it.kind;
       let crestEl: HTMLElement | null = null;
@@ -186,8 +198,8 @@ export class LabelLayer {
         el.textContent = it.name;
       }
       this.root.appendChild(el);
-      return { el, lng: it.lng, lat: it.lat, kind: it.kind, crestEl };
-    });
+      this.items.push({ el, lng: it.lng, lat: it.lat, kind: it.kind, crestEl });
+    }
     this.reposition();
   }
 
