@@ -66,7 +66,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
   const onReady = useCallback((map: MlMap) => {
     mapRef.current = map;
     fogRef.current = new FogLayer(map, settingsRef.current);
-    labelsRef.current = new LabelLayer(map);
+    labelsRef.current = new LabelLayer(map, fogRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -76,6 +76,8 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
     const map = mapRef.current;
     if (!fog || !map || !loaded) return;
     fog.setData(displayCells, pins);
+    // Re-evaluate labels after the fog reveal for the new data is rendered.
+    requestAnimationFrame(() => labelsRef.current?.refresh());
 
     if (!fittedRef.current && (displayCells.length > 0 || pins.length > 0)) {
       fittedRef.current = true;
@@ -90,7 +92,13 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
     fogRef.current?.setSettings(settings);
   }, [settings]);
 
-  useEffect(() => () => fogRef.current?.destroy(), []);
+  useEffect(
+    () => () => {
+      labelsRef.current?.destroy();
+      fogRef.current?.destroy();
+    },
+    [],
+  );
 
   // --- handlers ---
   function changeSettings(s: FogSettings) {

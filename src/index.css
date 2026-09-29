@@ -186,7 +186,7 @@ input[type="range"]::-moz-range-thumb {
 .dropzone:hover { border-color: var(--brass); background: rgba(201,162,75,0.06); }
 
 /* ---- engraved place labels (rendered overlay, below the fog) ---- */
-.maplabels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
+.maplabels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 3; }
 .maplabel {
   position: absolute; top: 0; left: 0; white-space: nowrap; will-change: transform;
   display: flex; flex-direction: column; align-items: center; gap: 1px;

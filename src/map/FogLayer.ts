@@ -63,6 +63,8 @@ interface Level {
   centers: Float64Array;
   /** Flat mercator [x, y, …] of the cell centres, for the affine screen transform. */
   cmerc: Float64Array;
+  /** Fraction 0..1 of each aggregated cell actually explored (finest cells = 1). */
+  cov: Float64Array;
 }
 
 // Web-Mercator projection to the unit square [0,1]², matching MapLibre. Doing this
@@ -101,6 +103,8 @@ export class FogLayer {
   private wctx: CanvasRenderingContext2D;
   private wtmp: HTMLCanvasElement;
   private wtctx: CanvasRenderingContext2D;
+  private mtmp: HTMLCanvasElement;
+  private mtctx: CanvasRenderingContext2D;
   private small: HTMLCanvasElement;
   private sctx: CanvasRenderingContext2D;
   private srcName: string | null = null;
@@ -136,13 +140,15 @@ export class FogLayer {
     this.mask = document.createElement("canvas");
     this.mctx = this.mask.getContext("2d")!;
     this.reveal = document.createElement("canvas");
-    this.rctx = this.reveal.getContext("2d")!;
+    this.rctx = this.reveal.getContext("2d", { willReadFrequently: true })!;
     this.veil = document.createElement("canvas");
     this.vctx = this.veil.getContext("2d")!;
     this.wrev = document.createElement("canvas");
-    this.wctx = this.wrev.getContext("2d")!;
+    this.wctx = this.wrev.getContext("2d", { willReadFrequently: true })!;
     this.wtmp = document.createElement("canvas");
     this.wtctx = this.wtmp.getContext("2d")!;
+    this.mtmp = document.createElement("canvas");
+    this.mtctx = this.mtmp.getContext("2d")!;
     this.small = document.createElement("canvas");
     this.sctx = this.small.getContext("2d")!;
 
@@ -185,23 +191,31 @@ export class FogLayer {
 
   private buildPyramid(cells: Cell[]) {
     this.levels = LADDER.map((res) => {
-      const set = new Set<string>();
-      for (const c of cells) set.add(res === H3_RES ? c.h3 : cellToParent(c.h3, res));
+      // Count how many finest-resolution cells fall inside each aggregated cell,
+      // so we can size its disc by real coverage instead of "any child explored".
+      const counts = new Map<string, number>();
+      for (const c of cells) {
+        const p = res === H3_RES ? c.h3 : cellToParent(c.h3, res);
+        counts.set(p, (counts.get(p) ?? 0) + 1);
+      }
+      const childPerParent = Math.pow(7, H3_RES - res); // res-9 cells inside a res cell
 
-      const n = set.size;
+      const n = counts.size;
       const centers = new Float64Array(n * 2);
       const cmerc = new Float64Array(n * 2);
+      const cov = new Float64Array(n);
       let ci = 0;
-      for (const h3 of set) {
+      for (const [h3, cnt] of counts) {
         const [clat, clng] = cellToLatLng(h3);
         centers[ci * 2] = clat;
         centers[ci * 2 + 1] = clng;
         const [mx, my] = lngLatToMerc(clng, clat);
         cmerc[ci * 2] = mx;
         cmerc[ci * 2 + 1] = my;
+        cov[ci] = Math.min(1, cnt / childPerParent);
         ci++;
       }
-      return { res, edgeM: getHexagonEdgeLengthAvg(res, "m"), centers, cmerc };
+      return { res, edgeM: getHexagonEdgeLengthAvg(res, "m"), centers, cmerc, cov };
     });
   }
 
@@ -230,6 +244,8 @@ export class FogLayer {
       this.wrev.height = fh;
       this.wtmp.width = fw;
       this.wtmp.height = fh;
+      this.mtmp.width = fw;
+      this.mtmp.height = fh;
       this.buildVeil(fw, fh);
     }
     return mc.clientWidth > 0 ? mc.width / mc.clientWidth : 1;
@@ -320,7 +336,12 @@ export class FogLayer {
     const by = p0.y * ms - ay * m0y;
 
     if (level && level.centers.length) {
-      const r = Math.max(minPx * DISC_R, edgePx * DISC_R) / MASK_DOWNSCALE;
+      // Disc area ∝ how much of the aggregated cell is actually explored, so the
+      // lit footprint stays honest when zoomed out (a lightly-visited coarse cell
+      // no longer balloons to its full size). A small floor keeps single spots
+      // visible as a dot.
+      const fullR = (edgePx * DISC_R) / MASK_DOWNSCALE;
+      const floorR = Math.max(minPx * 0.42, 1.5 * scale) / MASK_DOWNSCALE;
 
       const b = this.map.getBounds();
       const latPad = (edgePx * DISC_R + reachPx * MASK_DOWNSCALE) / Math.max(ppm, 1e-9) / 111320;
@@ -331,6 +352,7 @@ export class FogLayer {
       const north = b.getNorth() + latPad;
       const centers = level.centers;
       const cmerc = level.cmerc;
+      const cov = level.cov;
 
       mctx.beginPath();
       for (let ci = 0; ci < centers.length; ci += 2) {
@@ -339,8 +361,9 @@ export class FogLayer {
         if (lat < south || lat > north || lng < west || lng > east) continue;
         const x = ax * cmerc[ci] + bx;
         const y = ay * cmerc[ci + 1] + by;
-        mctx.moveTo(x + r, y);
-        mctx.arc(x, y, r, 0, Math.PI * 2);
+        const rr = Math.max(floorR, fullR * Math.sqrt(cov[ci >> 1]));
+        mctx.moveTo(x + rr, y);
+        mctx.arc(x, y, rr, 0, Math.PI * 2);
       }
       mctx.fill();
     }
@@ -356,6 +379,11 @@ export class FogLayer {
       mctx.arc(x, y, r, 0, Math.PI * 2);
       mctx.fill();
     }
+
+    // ---- 1b. Close small interior holes (morphological closing) so a fully
+    // surrounded pocket fills in and dense areas read as clean explored regions.
+    const closeRad = Math.min(8, (edgePx * 0.5) / MASK_DOWNSCALE);
+    if (closeRad >= 1.2) this.closeMask(closeRad, fw, fh);
 
     // ---- 2. Reveal alpha: soft core (full) + translucent halo, from the mask.
     // Precomputing this once per move means each drift frame is just two draws.
@@ -461,6 +489,56 @@ export class FogLayer {
       dctx.drawImage(this.small, 0, 0, sw, sh, 0, 0, W, H);
     }
     dctx.globalAlpha = 1;
+  }
+
+  /** Morphological closing (dilate then erode) of the coverage mask, in place. */
+  private closeMask(rad: number, fw: number, fh: number) {
+    const m = this.mctx;
+    const t = this.mtctx;
+    const d = rad * 0.7071;
+    const offs: Array<[number, number]> = [
+      [rad, 0],
+      [-rad, 0],
+      [0, rad],
+      [0, -rad],
+      [d, d],
+      [d, -d],
+      [-d, d],
+      [-d, -d],
+    ];
+    // Dilate: union with shifted copies of the current mask.
+    t.setTransform(1, 0, 0, 1, 0, 0);
+    t.globalCompositeOperation = "source-over";
+    t.clearRect(0, 0, fw, fh);
+    t.drawImage(this.mask, 0, 0);
+    m.globalCompositeOperation = "source-over";
+    for (const [ox, oy] of offs) m.drawImage(this.mtmp, ox, oy);
+    // Erode: intersect with shifted copies of the dilated mask.
+    t.clearRect(0, 0, fw, fh);
+    t.drawImage(this.mask, 0, 0);
+    m.globalCompositeOperation = "destination-in";
+    for (const [ox, oy] of offs) m.drawImage(this.mtmp, ox, oy);
+    m.globalCompositeOperation = "source-over";
+  }
+
+  /** True if the point is currently under a cleared (explored or open-sea) area. */
+  isRevealed(lng: number, lat: number): boolean {
+    const mc = this.map.getCanvas();
+    const cw = mc.clientWidth;
+    const ch = mc.clientHeight;
+    if (cw <= 0 || ch <= 0) return false;
+    const p = this.map.project([lng, lat]);
+    const fw = this.reveal.width;
+    const fh = this.reveal.height;
+    const sx = Math.round((p.x / cw) * fw);
+    const sy = Math.round((p.y / ch) * fh);
+    if (sx < 0 || sy < 0 || sx >= fw || sy >= fh) return false;
+    try {
+      if (this.rctx.getImageData(sx, sy, 1, 1).data[3] > 45) return true;
+      return this.wctx.getImageData(sx, sy, 1, 1).data[3] > 45;
+    } catch {
+      return true; // if pixel readback is blocked, don't hide the label
+    }
   }
 
   private vectorSource(): string | null {
