@@ -3,6 +3,7 @@ import maplibregl, { type Map as MlMap } from "maplibre-gl";
 import { getHexagonAreaAvg } from "h3-js";
 import { MapView } from "../map/MapView";
 import { FogLayer } from "../map/FogLayer";
+import { LabelLayer } from "../map/LabelLayer";
 import { MapChrome } from "./MapChrome";
 import { MenuPanel } from "./MenuPanel";
 import { ImportScreen } from "./ImportScreen";
@@ -36,6 +37,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
 
   const mapRef = useRef<MlMap | null>(null);
   const fogRef = useRef<FogLayer | null>(null);
+  const labelsRef = useRef<LabelLayer | null>(null);
   const fittedRef = useRef(false);
   const saveTimer = useRef<number>();
   const settingsRef = useRef(settings);
@@ -64,6 +66,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
   const onReady = useCallback((map: MlMap) => {
     mapRef.current = map;
     fogRef.current = new FogLayer(map, settingsRef.current);
+    labelsRef.current = new LabelLayer(map);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
