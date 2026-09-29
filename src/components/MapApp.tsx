@@ -6,6 +6,7 @@ import { FogLayer } from "../map/FogLayer";
 import { LabelLayer } from "../map/LabelLayer";
 import { MapChrome } from "./MapChrome";
 import { MenuPanel } from "./MenuPanel";
+import { FogLab, loadTuning } from "./FogLab";
 import { ImportScreen } from "./ImportScreen";
 import { StravaImport } from "./StravaImport";
 import { supabase } from "../lib/supabase";
@@ -32,6 +33,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [labOpen, setLabOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [stravaOpen, setStravaOpen] = useState(false);
 
@@ -66,6 +68,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
   const onReady = useCallback((map: MlMap) => {
     mapRef.current = map;
     fogRef.current = new FogLayer(map, settingsRef.current);
+    fogRef.current.setTuning(loadTuning());
     labelsRef.current = new LabelLayer(map, fogRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -177,8 +180,22 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
           onOpenImport={() => setImportOpen(true)}
           onOpenStrava={() => setStravaOpen(true)}
           onExport={exportCells}
+          onOpenLab={() => {
+            setLabOpen(true);
+            setMenuOpen(false);
+          }}
           onSignOut={() => supabase?.auth.signOut()}
           onClose={() => setMenuOpen(false)}
+        />
+      )}
+
+      {labOpen && (
+        <FogLab
+          settings={settings}
+          onSettings={changeSettings}
+          fog={fogRef.current}
+          map={mapRef.current}
+          onClose={() => setLabOpen(false)}
         />
       )}
 

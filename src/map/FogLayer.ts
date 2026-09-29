@@ -112,6 +112,14 @@ export class FogLayer {
   private lastCells: Cell[] | null = null;
   private pins: Pin[] = [];
   private settings: FogSettings;
+  // Advanced, live-tunable knobs (Fog Lab). Default to the baked constants.
+  private tuning = {
+    discR: DISC_R,
+    coreEdge: CORE_BLUR_EDGE,
+    markSurvive: 1.3,
+    closeScale: 1,
+    haloAlpha: HALO_ALPHA,
+  };
   private raf = 0;
   private driftRaf = 0;
   private lastDrift = 0;
@@ -176,6 +184,15 @@ export class FogLayer {
 
   setSettings(settings: FogSettings) {
     this.settings = settings;
+    this.schedule();
+  }
+
+  getTuning() {
+    return { ...this.tuning };
+  }
+
+  setTuning(t: Partial<typeof this.tuning>) {
+    this.tuning = { ...this.tuning, ...t };
     this.schedule();
   }
 
@@ -310,7 +327,7 @@ export class FogLayer {
       this.levels.find((l) => l.edgeM * ppm >= minPx) ?? this.levels[this.levels.length - 1];
     const edgePx = level ? level.edgeM * ppm : 8;
 
-    const coreBlur = Math.max(CORE_BLUR_MIN * scale, edgePx * CORE_BLUR_EDGE) / MASK_DOWNSCALE;
+    const coreBlur = Math.max(CORE_BLUR_MIN * scale, edgePx * this.tuning.coreEdge) / MASK_DOWNSCALE;
     const haloBlur =
       ((HALO_BLUR_BASE + this.settings.fade * HALO_BLUR_SPREAD) * scale + edgePx * HALO_BLUR_EDGE) /
       MASK_DOWNSCALE;
@@ -344,12 +361,16 @@ export class FogLayer {
       //    out against the fog). The min mark is a fixed screen size, not the
       //    coarse cell's size, so it stays a modest dot rather than a whole region.
       // Zoomed in, the footprint wins; zoomed out, the mark wins — both covered.
-      const fullR = (edgePx * DISC_R) / MASK_DOWNSCALE;
+      const fullR = (edgePx * this.tuning.discR) / MASK_DOWNSCALE;
       const g = Math.max(0, Math.min(1, this.settings.generosity ?? 0.65));
-      const minMark = Math.max(((3 + g * 9) * scale) / MASK_DOWNSCALE, coreBlur * 1.3);
+      const minMark = Math.max(
+        ((3 + g * 9) * scale) / MASK_DOWNSCALE,
+        coreBlur * this.tuning.markSurvive,
+      );
 
       const b = this.map.getBounds();
-      const latPad = (edgePx * DISC_R + reachPx * MASK_DOWNSCALE) / Math.max(ppm, 1e-9) / 111320;
+      const latPad =
+        (edgePx * this.tuning.discR + reachPx * MASK_DOWNSCALE) / Math.max(ppm, 1e-9) / 111320;
       const lngPad = latPad / Math.max(0.15, Math.cos((c.lat * Math.PI) / 180));
       const west = b.getWest() - lngPad;
       const east = b.getEast() + lngPad;
@@ -387,7 +408,7 @@ export class FogLayer {
 
     // ---- 1b. Close small interior holes (morphological closing) so a fully
     // surrounded pocket fills in and dense areas read as clean explored regions.
-    const closeRad = Math.min(8, (edgePx * 0.5) / MASK_DOWNSCALE);
+    const closeRad = Math.min(8, (edgePx * 0.5) / MASK_DOWNSCALE) * this.tuning.closeScale;
     if (closeRad >= 1.2) this.closeMask(closeRad, fw, fh);
 
     // ---- 2. Reveal alpha: soft core (full) + translucent halo, from the mask.
@@ -402,7 +423,7 @@ export class FogLayer {
     // (desktop), else a downscale/upscale blur that also softens on iOS Safari,
     // where canvas ctx.filter is unsupported and would leave hard edges.
     this.blurDraw(rctx, this.mask, coreBlur, 1);
-    this.blurDraw(rctx, this.mask, haloBlur, HALO_ALPHA);
+    this.blurDraw(rctx, this.mask, haloBlur, this.tuning.haloAlpha);
     rctx.globalAlpha = 1;
 
     // ---- 2b. Water: reveal open sea, eroded inward from every coast by a margin.
