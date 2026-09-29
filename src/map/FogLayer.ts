@@ -101,6 +101,8 @@ export class FogLayer {
   private wctx: CanvasRenderingContext2D;
   private wtmp: HTMLCanvasElement;
   private wtctx: CanvasRenderingContext2D;
+  private small: HTMLCanvasElement;
+  private sctx: CanvasRenderingContext2D;
   private srcName: string | null = null;
   private levels: Level[] = [];
   private lastCells: Cell[] | null = null;
@@ -141,6 +143,8 @@ export class FogLayer {
     this.wctx = this.wrev.getContext("2d")!;
     this.wtmp = document.createElement("canvas");
     this.wtctx = this.wtmp.getContext("2d")!;
+    this.small = document.createElement("canvas");
+    this.sctx = this.small.getContext("2d")!;
 
     this.schedule = this.schedule.bind(this);
     this.driftTick = this.driftTick.bind(this);
@@ -361,13 +365,11 @@ export class FogLayer {
     rctx.globalAlpha = 1;
     rctx.filter = "none";
     rctx.clearRect(0, 0, fw, fh);
-    rctx.filter = coreBlur > 0.3 ? `blur(${coreBlur}px)` : "none";
-    rctx.globalAlpha = 1;
-    rctx.drawImage(this.mask, 0, 0);
-    rctx.filter = `blur(${haloBlur}px)`;
-    rctx.globalAlpha = HALO_ALPHA;
-    rctx.drawImage(this.mask, 0, 0);
-    rctx.filter = "none";
+    // Soft core (full) + translucent halo. Blur via ctx.filter where it works
+    // (desktop), else a downscale/upscale blur that also softens on iOS Safari,
+    // where canvas ctx.filter is unsupported and would leave hard edges.
+    this.blurDraw(rctx, this.mask, coreBlur, 1);
+    this.blurDraw(rctx, this.mask, haloBlur, HALO_ALPHA);
     rctx.globalAlpha = 1;
 
     // ---- 2b. Water: reveal open sea, eroded inward from every coast by a margin.
@@ -429,6 +431,36 @@ export class FogLayer {
     if (typeof document !== "undefined" && document.hidden) return;
     // Only the veil offset changes; the reveal + mask are reused as-is.
     this.composite(t);
+  }
+
+  /** Draw `src` blurred by `radius` (mask px) into rctx at `alpha`. Uses
+   *  ctx.filter where supported, else a downscale/upscale blur for iOS Safari. */
+  private blurDraw(
+    dctx: CanvasRenderingContext2D,
+    src: HTMLCanvasElement,
+    radius: number,
+    alpha: number,
+  ) {
+    const W = this.reveal.width;
+    const H = this.reveal.height;
+    dctx.globalAlpha = alpha;
+    if (ctxFilterSupported()) {
+      dctx.filter = radius > 0.3 ? `blur(${radius}px)` : "none";
+      dctx.drawImage(src, 0, 0);
+      dctx.filter = "none";
+    } else {
+      const f = Math.max(1, radius);
+      const sw = Math.max(1, Math.round(W / f));
+      const sh = Math.max(1, Math.round(H / f));
+      this.small.width = sw;
+      this.small.height = sh;
+      this.sctx.imageSmoothingEnabled = true;
+      this.sctx.clearRect(0, 0, sw, sh);
+      this.sctx.drawImage(src, 0, 0, sw, sh);
+      dctx.imageSmoothingEnabled = true;
+      dctx.drawImage(this.small, 0, 0, sw, sh, 0, 0, W, H);
+    }
+    dctx.globalAlpha = 1;
   }
 
   private vectorSource(): string | null {
@@ -602,6 +634,33 @@ function fbm(w: number, h: number, seed: number): ImageData {
   ax.globalAlpha = 1;
   ax.globalCompositeOperation = "source-over";
   return ax.getImageData(0, 0, w, h);
+}
+
+// Canvas 2D ctx.filter (used for the soft blur) is unsupported on many iOS Safari
+// versions, where it silently no-ops and leaves hard edges. Detect it once.
+let _ctxFilter: boolean | null = null;
+function ctxFilterSupported(): boolean {
+  if (_ctxFilter !== null) return _ctxFilter;
+  try {
+    const c = document.createElement("canvas");
+    c.width = 8;
+    c.height = 1;
+    const x = c.getContext("2d")!;
+    x.fillStyle = "#fff";
+    x.fillRect(0, 0, 4, 1);
+    const c2 = document.createElement("canvas");
+    c2.width = 8;
+    c2.height = 1;
+    const x2 = c2.getContext("2d")!;
+    x2.filter = "blur(2px)";
+    x2.drawImage(c, 0, 0);
+    x2.filter = "none";
+    // If blur worked, white bled past x=4 into the previously-transparent region.
+    _ctxFilter = x2.getImageData(5, 0, 1, 1).data[3] > 4;
+  } catch {
+    _ctxFilter = false;
+  }
+  return _ctxFilter;
 }
 
 function mulberry32(a: number): () => number {
