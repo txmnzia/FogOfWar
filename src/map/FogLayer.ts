@@ -1,5 +1,5 @@
 import type { Map as MlMap } from "maplibre-gl";
-import { cellToParent, cellToLatLng, cellToBoundary, getHexagonEdgeLengthAvg } from "h3-js";
+import { cellToParent, cellToLatLng, getHexagonEdgeLengthAvg } from "h3-js";
 import { H3_RES, type FogSettings } from "../lib/constants";
 import type { Cell, Pin } from "../lib/types";
 
@@ -11,19 +11,48 @@ const LADDER = [H3_RES, 8, 7, 6, 5, 4, 3, 2];
 // Bigger → fewer, larger cells on screen → cheaper, but coarser aggregation
 // slightly over-states a thin route. Kept small so the lit area stays honest.
 const MIN_DRAW_CSS = 6;
-// Soft candlelight edge width from the "fade" setting (CSS px).
-const BLUR_MIN = 1.5;
-const BLUR_SPREAD = 7;
+
+// The fog is painted from a single coverage mask (explored cells + pins), so
+// everything reads as one material. Two layers are cut from that mask:
+//
+//  • the CORE — the mask softened just enough to melt the hexagon corners into
+//    rounded, organic shapes; fully lifts the veil, so it defines exactly where
+//    you've been. Its size matches the aggregated footprint (only rounded).
+//  • the HALO — the same mask blurred hard and laid down as a translucent glow
+//    that reaches outward and fades into the dark. Because it only ever lifts a
+//    fraction of the veil, a wide reach reads as candlelight, not as territory.
+//
+// Everything is drawn at 1/MASK_DOWNSCALE resolution and scaled back up, which
+// is invisible on such soft imagery, quarters the fill+blur cost, and adds a
+// little extra watercolor smoothing for free.
+const MASK_DOWNSCALE = 3;
+// Core softening, as a share of the cell edge (device px). Discs are already
+// round and connected, so this only needs to smooth the small scallops where
+// neighbouring discs meet.
+const CORE_BLUR_EDGE = 0.85;
+const CORE_BLUR_MIN = 2;
+// Halo reach (device px): a base plus the "fade" setting plus a share of the
+// cell, so the glow scales with both the slider and the zoom.
+const HALO_BLUR_BASE = 6;
+const HALO_BLUR_SPREAD = 48;
+const HALO_BLUR_EDGE = 0.9;
+// Peak translucency of the halo (fraction of the veil it lifts just outside the
+// core). Below 1 so the glow always stays a glow.
+const HALO_ALPHA = 0.85;
+
+// Disc radius per cell, as a share of the cell edge. At 1.0 a disc reaches the
+// cell's corners, so neighbours overlap into a smooth, gapless region and a thin
+// route becomes a continuous sausage — round shapes have no flat edges, so there
+// are no hexagon steps to show.
+const DISC_R = 1.15;
 
 interface Level {
   res: number;
   edgeM: number;
   /** Flat [lat, lng, …] of the (deduped) cell centres — used for viewport culling. */
   centers: Float64Array;
-  /** Flat mercator [x, y, …] of every cell's boundary vertices, concatenated. */
-  merc: Float64Array;
-  /** Number of boundary vertices for each cell (5 or 6). */
-  counts: Uint8Array;
+  /** Flat mercator [x, y, …] of the cell centres, for the affine screen transform. */
+  cmerc: Float64Array;
 }
 
 // Web-Mercator projection to the unit square [0,1]², matching MapLibre. Doing this
@@ -39,14 +68,12 @@ function lngLatToMerc(lng: number, lat: number): [number, number] {
 /**
  * Fog as a canvas overlay synced to the map.
  *
- * Explored cells erase the dark veil as their true H3 hexagons, unioned on an
- * offscreen canvas, then composited through a light blur for a soft candlelight
- * edge. Because H3 hexagons tile the plane, adjacent explored cells join with no
- * gaps or beading, and the lit region is exactly the union of cells you've
- * actually visited — it never balloons past your real footprint. Cells are
- * pre-aggregated into an H3 pyramid, so a zoomed-out view draws a handful of
- * coarse hexagons instead of tens of thousands, keeping pan/zoom smooth on any
- * device regardless of history size.
+ * Explored cells and manual pins are rasterised into one coverage mask, then
+ * painted as a soft, organic "candlelight" clearing: a rounded solid core that
+ * marks exactly where you've been, wrapped in a wide translucent glow that fades
+ * gradually into the dark. Cells are pre-aggregated into an H3 pyramid, so a
+ * zoomed-out view rasterises a handful of coarse shapes instead of tens of
+ * thousands, keeping pan/zoom smooth on any device regardless of history size.
  */
 export class FogLayer {
   private map: MlMap;
@@ -54,6 +81,8 @@ export class FogLayer {
   private ctx: CanvasRenderingContext2D;
   private fog: HTMLCanvasElement;
   private fctx: CanvasRenderingContext2D;
+  private mask: HTMLCanvasElement;
+  private mctx: CanvasRenderingContext2D;
   private levels: Level[] = [];
   private lastCells: Cell[] | null = null;
   private pins: Pin[] = [];
@@ -78,6 +107,8 @@ export class FogLayer {
     this.ctx = this.canvas.getContext("2d")!;
     this.fog = document.createElement("canvas");
     this.fctx = this.fog.getContext("2d")!;
+    this.mask = document.createElement("canvas");
+    this.mctx = this.mask.getContext("2d")!;
 
     this.schedule = this.schedule.bind(this);
     map.on("move", this.schedule);
@@ -120,31 +151,18 @@ export class FogLayer {
 
       const n = set.size;
       const centers = new Float64Array(n * 2);
-      const counts = new Uint8Array(n);
-      // Pre-size assuming 6 vertices/cell (pentagons, which have 5, are
-      // vanishingly rare); grow only if that ever proves too small.
-      let merc = new Float64Array(n * 12);
+      const cmerc = new Float64Array(n * 2);
       let ci = 0;
-      let vi = 0;
       for (const h3 of set) {
         const [clat, clng] = cellToLatLng(h3);
         centers[ci * 2] = clat;
         centers[ci * 2 + 1] = clng;
-        const bnd = cellToBoundary(h3); // [[lat, lng], …]
-        counts[ci] = bnd.length;
-        if (vi + bnd.length * 2 > merc.length) {
-          const grown = new Float64Array(merc.length + bnd.length * 2 + n * 2);
-          grown.set(merc);
-          merc = grown;
-        }
-        for (const [vlat, vlng] of bnd) {
-          const [mx, my] = lngLatToMerc(vlng, vlat);
-          merc[vi++] = mx;
-          merc[vi++] = my;
-        }
+        const [mx, my] = lngLatToMerc(clng, clat);
+        cmerc[ci * 2] = mx;
+        cmerc[ci * 2 + 1] = my;
         ci++;
       }
-      return { res, edgeM: getHexagonEdgeLengthAvg(res, "m"), centers, counts, merc };
+      return { res, edgeM: getHexagonEdgeLengthAvg(res, "m"), centers, cmerc };
     });
   }
 
@@ -161,8 +179,12 @@ export class FogLayer {
     if (this.canvas.width !== mc.width || this.canvas.height !== mc.height) {
       this.canvas.width = mc.width;
       this.canvas.height = mc.height;
-      this.fog.width = mc.width;
-      this.fog.height = mc.height;
+      const fw = Math.max(1, Math.ceil(mc.width / MASK_DOWNSCALE));
+      const fh = Math.max(1, Math.ceil(mc.height / MASK_DOWNSCALE));
+      this.fog.width = fw;
+      this.fog.height = fh;
+      this.mask.width = fw;
+      this.mask.height = fh;
     }
     return mc.clientWidth > 0 ? mc.width / mc.clientWidth : 1;
   }
@@ -182,102 +204,118 @@ export class FogLayer {
     const H = this.canvas.height;
     const ctx = this.ctx;
     const fctx = this.fctx;
-
-    // Dark veil on the offscreen canvas.
-    fctx.setTransform(1, 0, 0, 1, 0, 0);
-    fctx.globalCompositeOperation = "source-over";
-    fctx.clearRect(0, 0, W, H);
-    fctx.fillStyle = `rgba(20,14,7,${this.settings.darkness})`;
-    fctx.fillRect(0, 0, W, H);
+    const mctx = this.mctx;
+    // Mask/fog work at 1/MASK_DOWNSCALE resolution. `ms` maps a projected CSS
+    // coordinate straight into mask pixels; device sizes convert with `/ scl`.
+    const fw = this.mask.width;
+    const fh = this.mask.height;
+    const ms = scale / MASK_DOWNSCALE;
 
     const ppm = this.pixelsPerMeter(scale);
     const minPx = MIN_DRAW_CSS * scale;
     const level =
       this.levels.find((l) => l.edgeM * ppm >= minPx) ?? this.levels[this.levels.length - 1];
     const edgePx = level ? level.edgeM * ppm : 8;
-    // Candlelight softness: a fixed base from the "fade" setting plus a share of
-    // the cell size, so coarse (zoomed-out) cells melt their hexagon steps into a
-    // smooth ribbon while fine cells stay crisp. Capped so a lone cell is never
-    // erased by its own blur (which would also make the lit area balloon).
-    const blurPx = Math.min(
-      (BLUR_MIN + this.settings.fade * BLUR_SPREAD) * scale + edgePx * 0.3,
-      edgePx * 0.85,
-    );
 
-    fctx.globalCompositeOperation = "destination-out";
-    fctx.fillStyle = "#000";
+    // Layer softness in mask pixels.
+    const coreBlur = Math.max(CORE_BLUR_MIN * scale, edgePx * CORE_BLUR_EDGE) / MASK_DOWNSCALE;
+    const haloBlur =
+      ((HALO_BLUR_BASE + this.settings.fade * HALO_BLUR_SPREAD) * scale + edgePx * HALO_BLUR_EDGE) /
+      MASK_DOWNSCALE;
+    const reachPx = coreBlur + haloBlur; // for viewport culling
+
+    // ---- 1. Coverage mask: a disc per explored cell + pins, solid, at low res.
+    // Overlapping discs union into smooth, organic shapes with no hexagon edges.
+    mctx.setTransform(1, 0, 0, 1, 0, 0);
+    mctx.globalCompositeOperation = "source-over";
+    mctx.clearRect(0, 0, fw, fh);
+    mctx.fillStyle = "#fff";
 
     if (level && level.centers.length) {
-      // Derive the affine mercator→screen transform from two projected reference
-      // points (exact for the app's north-up, unpitched map): screen = a·merc + b.
-      // This lets us place every vertex with two multiplies instead of a full
-      // map.project() call per vertex.
+      // Affine mercator→screen transform from two projected reference points
+      // (exact for the app's north-up, unpitched map): screen = a·merc + b. Lets
+      // us place every centre with two multiplies instead of a projection call.
       const c = this.map.getCenter();
       const [m0x, m0y] = lngLatToMerc(c.lng, c.lat);
       const dxDeg = 0.05;
       const [m1x, m1y] = lngLatToMerc(c.lng + dxDeg, c.lat + dxDeg);
       const p0 = this.map.project([c.lng, c.lat]);
       const p1 = this.map.project([c.lng + dxDeg, c.lat + dxDeg]);
-      const ax = ((p1.x - p0.x) / (m1x - m0x)) * scale;
-      const ay = ((p1.y - p0.y) / (m1y - m0y)) * scale;
-      const bx = p0.x * scale - ax * m0x;
-      const by = p0.y * scale - ay * m0y;
+      const ax = ((p1.x - p0.x) / (m1x - m0x)) * ms;
+      const ay = ((p1.y - p0.y) / (m1y - m0y)) * ms;
+      const bx = p0.x * ms - ax * m0x;
+      const by = p0.y * ms - ay * m0y;
 
-      // Viewport bounds padded by a cell + the blur reach, in degrees.
+      // Disc radius in mask pixels (never smaller than the min-draw size).
+      const r = Math.max(minPx * DISC_R, edgePx * DISC_R) / MASK_DOWNSCALE;
+
+      // Viewport bounds padded by a disc + the glow reach, in degrees.
       const b = this.map.getBounds();
-      const latPad = level.edgeM / 111320 + blurPx / Math.max(ppm, 1e-9) / 111320;
+      const latPad =
+        (edgePx * DISC_R + reachPx * MASK_DOWNSCALE) / Math.max(ppm, 1e-9) / 111320;
       const lngPad = latPad / Math.max(0.15, Math.cos((c.lat * Math.PI) / 180));
       const west = b.getWest() - lngPad;
       const east = b.getEast() + lngPad;
       const south = b.getSouth() - latPad;
       const north = b.getNorth() + latPad;
       const centers = level.centers;
-      const merc = level.merc;
-      const counts = level.counts;
+      const cmerc = level.cmerc;
 
-      // One accumulated path of every visible hexagon; a single fill() unions
-      // them (overlaps erase idempotently), giving a clean continuous region.
-      fctx.beginPath();
-      let vi = 0;
-      for (let ci = 0; ci < counts.length; ci++) {
-        const n = counts[ci];
-        const lat = centers[ci * 2];
-        const lng = centers[ci * 2 + 1];
-        if (lat < south || lat > north || lng < west || lng > east) {
-          vi += n * 2;
-          continue;
-        }
-        for (let k = 0; k < n; k++) {
-          const x = ax * merc[vi] + bx;
-          const y = ay * merc[vi + 1] + by;
-          if (k === 0) fctx.moveTo(x, y);
-          else fctx.lineTo(x, y);
-          vi += 2;
-        }
-        fctx.closePath();
+      mctx.beginPath();
+      for (let ci = 0; ci < centers.length; ci += 2) {
+        const lat = centers[ci];
+        const lng = centers[ci + 1];
+        if (lat < south || lat > north || lng < west || lng > east) continue;
+        const x = ax * cmerc[ci] + bx;
+        const y = ay * cmerc[ci + 1] + by;
+        mctx.moveTo(x + r, y);
+        mctx.arc(x, y, r, 0, Math.PI * 2);
       }
-      fctx.fill();
+      mctx.fill();
     }
 
-    // Pins: a filled disc of their radius.
+    // Pins share the mask, so they paint with the same material as explored land.
     for (const pin of this.pins) {
       const p = this.map.project([pin.lng, pin.lat]);
-      const x = p.x * scale;
-      const y = p.y * scale;
-      const r = Math.max(minPx, pin.radiusM * ppm);
-      if (x < -r - blurPx || x > W + r + blurPx || y < -r - blurPx || y > H + r + blurPx) continue;
-      fctx.beginPath();
-      fctx.arc(x, y, r, 0, Math.PI * 2);
-      fctx.fill();
+      const x = p.x * ms;
+      const y = p.y * ms;
+      const r = Math.max(minPx, pin.radiusM * ppm) / MASK_DOWNSCALE;
+      if (x < -r - reachPx || x > fw + r + reachPx || y < -r - reachPx || y > fh + r + reachPx)
+        continue;
+      mctx.beginPath();
+      mctx.arc(x, y, r, 0, Math.PI * 2);
+      mctx.fill();
     }
-    fctx.globalCompositeOperation = "source-over";
 
-    // Composite through a light blur: a soft candlelight edge that also melts the
-    // hexagon vertices into one smooth, organic region.
+    // ---- 2. Veil, then cut the two layers out of it. ----
+    fctx.setTransform(1, 0, 0, 1, 0, 0);
+    fctx.globalCompositeOperation = "source-over";
+    fctx.globalAlpha = 1;
+    fctx.filter = "none";
+    fctx.clearRect(0, 0, fw, fh);
+    fctx.fillStyle = `rgba(20,14,7,${this.settings.darkness})`;
+    fctx.fillRect(0, 0, fw, fh);
+
+    fctx.globalCompositeOperation = "destination-out";
+    // Core: fully lift the veil over the footprint. The disc mask is already
+    // round and connected, so a soft blur here smooths the scallops between
+    // overlapping discs into one continuous, hand-painted body.
+    fctx.globalAlpha = 1;
+    fctx.filter = coreBlur > 0.3 ? `blur(${coreBlur}px)` : "none";
+    fctx.drawImage(this.mask, 0, 0);
+    // Halo: partially lift a wide, soft glow that fades into the dark.
+    fctx.globalAlpha = HALO_ALPHA;
+    fctx.filter = `blur(${haloBlur}px)`;
+    fctx.drawImage(this.mask, 0, 0);
+
+    fctx.globalCompositeOperation = "source-over";
+    fctx.globalAlpha = 1;
+    fctx.filter = "none";
+
+    // ---- 3. Scale the soft fog up onto the visible canvas. ----
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, W, H);
-    ctx.filter = blurPx > 0.4 ? `blur(${blurPx}px)` : "none";
-    ctx.drawImage(this.fog, 0, 0);
-    ctx.filter = "none";
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(this.fog, 0, 0, fw, fh, 0, 0, W, H);
   }
 }
