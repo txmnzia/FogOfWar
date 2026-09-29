@@ -13,6 +13,7 @@ interface Props {
   onOpenImport: () => void;
   onOpenStrava: () => void;
   onExport: () => void;
+  onOpenLab: () => void;
   onSignOut: () => void;
   onClose: () => void;
 }
@@ -66,6 +67,7 @@ export function MenuPanel(p: Props) {
           />
         </div>
         <p className="hint">How dark the unknown stays, and how gradually your explored land dissolves into it. Low-zoom coverage sets how boldly explored spots show when zoomed right out — lower is truer to your footprint, higher keeps them visible at continent scale.</p>
+        <button className="btn ghost block" style={{ marginTop: 10 }} onClick={p.onOpenLab}>Fog Lab (advanced)</button>
       </div>
 
       <div className="section">
