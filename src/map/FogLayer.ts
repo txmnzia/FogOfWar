@@ -8,44 +8,47 @@ import type { Cell, Pin } from "../lib/types";
 // shapes drawn depends on the screen, not on how much history you have.
 const LADDER = [H3_RES, 8, 7, 6, 5, 4, 3, 2];
 // Aggregate to a coarser level once a cell would draw smaller than this (CSS px).
-// Bigger → fewer, larger cells on screen → cheaper, but coarser aggregation
-// slightly over-states a thin route. Kept small so the lit area stays honest.
 const MIN_DRAW_CSS = 6;
 
 // The fog is painted from a single coverage mask (explored cells + pins), so
-// everything reads as one material. Two layers are cut from that mask:
+// everything reads as one material. Instead of dimming the world with a flat
+// veil, the unexplored ground is HIDDEN beneath a painted-cloud layer, and going
+// somewhere lifts that layer to reveal the full-colour map underneath. The reveal
+// is a soft feather: a rounded core that fully clears, wrapped in a translucent
+// halo that dissolves gently back into the clouds.
 //
-//  • the CORE — the mask softened just enough to melt the hexagon corners into
-//    rounded, organic shapes; fully lifts the veil, so it defines exactly where
-//    you've been. Its size matches the aggregated footprint (only rounded).
-//  • the HALO — the same mask blurred hard and laid down as a translucent glow
-//    that reaches outward and fades into the dark. Because it only ever lifts a
-//    fraction of the veil, a wide reach reads as candlelight, not as territory.
-//
-// Everything is drawn at 1/MASK_DOWNSCALE resolution and scaled back up, which
-// is invisible on such soft imagery, quarters the fill+blur cost, and adds a
-// little extra watercolor smoothing for free.
+// Everything is composited at 1/MASK_DOWNSCALE resolution and scaled back up:
+// invisible on such soft imagery, and it quarters the fill/blur cost.
 const MASK_DOWNSCALE = 3;
-// Colour of the veil over unexplored ground — a dark neutral grey.
-const VEIL_RGB = "32,34,40";
-// Edge softness, as a share of the cell edge (device px). A single blur of the
-// disc mask dissolves the boundary into the grey — soft, but contained, so the
-// bright area stays clearly readable (matching the reference's moderate feather).
+
+// ---- Painted-cloud veil (the "unexplored" surface) -------------------------
+// Aged vellum with drifting cloud mottling. Tones are kept a touch lighter and
+// warmer than the parchment basemap so the clouds read as a layer ABOVE the map.
+// (Tunable set — mirrored by the Fog Reveal Studio prototype.)
+const VEIL_PAPER: [number, number, number] = [206, 190, 156]; // base vellum
+const VEIL_SHADOW: [number, number, number] = [156, 139, 107]; // low mottling
+const VEIL_WISP: [number, number, number] = [240, 236, 226]; // cloud highlights
+const VEIL_CONTRAST = 0.85; // spread of the cloud mottling
+const VEIL_WISP_STRENGTH = 0.32; // how much white cloud shows through
+const VEIL_MARGIN = 28; // mask-px overscan so drift never exposes an edge
+const DRIFT_AMP = 10; // mask-px drift amplitude (0 = still)
+const DRIFT_SPEED = 1; // drift speed multiplier
+const DRIFT_FPS = 12; // throttle the drift so it barely costs battery
+
+// ---- Reveal shape ----------------------------------------------------------
+// Edge softness, as a share of the cell edge (device px): a single wide blur of
+// the disc mask dissolves the boundary into the clouds — soft, but contained.
 const CORE_BLUR_EDGE = 0.7;
 const CORE_BLUR_MIN = 3;
-// Halo reach (device px): a modest outer glow just past the soft edge. Driven by
-// the "fade" setting, so the slider can push it wider/dreamier on demand.
+// Halo reach (device px): a modest translucent glow just past the soft edge,
+// driven by the "fade" setting so the slider can push it wider on demand.
 const HALO_BLUR_BASE = 4;
 const HALO_BLUR_SPREAD = 22;
 const HALO_BLUR_EDGE = 0.6;
-// Peak translucency of the halo (fraction of the veil it lifts just outside the
-// edge). Kept modest so it reads as a soft glow, not a second wide fade.
 const HALO_ALPHA = 0.55;
 
-// Disc radius per cell, as a share of the cell edge. At 1.0 a disc reaches the
-// cell's corners, so neighbours overlap into a smooth, gapless region and a thin
-// route becomes a continuous sausage — round shapes have no flat edges, so there
-// are no hexagon steps to show.
+// Disc radius per cell, as a share of the cell edge. Overlapping discs union into
+// smooth, organic shapes with no hexagon steps, and a thin route stays connected.
 const DISC_R = 1.25;
 
 interface Level {
@@ -70,12 +73,12 @@ function lngLatToMerc(lng: number, lat: number): [number, number] {
 /**
  * Fog as a canvas overlay synced to the map.
  *
- * Explored cells and manual pins are rasterised into one coverage mask, then
- * painted as a soft, organic "candlelight" clearing: a rounded solid core that
- * marks exactly where you've been, wrapped in a wide translucent glow that fades
- * gradually into the dark. Cells are pre-aggregated into an H3 pyramid, so a
- * zoomed-out view rasterises a handful of coarse shapes instead of tens of
- * thousands, keeping pan/zoom smooth on any device regardless of history size.
+ * Explored cells and manual pins are rasterised into one coverage mask. That mask
+ * is blurred into a "reveal" alpha (soft core + translucent halo), which is then
+ * cut out of a drifting painted-cloud layer: the map is revealed in full colour
+ * exactly where you've been, and hidden under slowly drifting cloud everywhere
+ * else. Cells are pre-aggregated into an H3 pyramid, so a zoomed-out view
+ * rasterises a handful of coarse shapes instead of tens of thousands.
  */
 export class FogLayer {
   private map: MlMap;
@@ -85,16 +88,25 @@ export class FogLayer {
   private fctx: CanvasRenderingContext2D;
   private mask: HTMLCanvasElement;
   private mctx: CanvasRenderingContext2D;
+  private reveal: HTMLCanvasElement;
+  private rctx: CanvasRenderingContext2D;
+  private veil: HTMLCanvasElement;
+  private vctx: CanvasRenderingContext2D;
   private levels: Level[] = [];
   private lastCells: Cell[] | null = null;
   private pins: Pin[] = [];
   private settings: FogSettings;
   private raf = 0;
+  private driftRaf = 0;
+  private lastDrift = 0;
+  private reduce: boolean;
   private ro: ResizeObserver;
 
   constructor(map: MlMap, settings: FogSettings) {
     this.map = map;
     this.settings = settings;
+    this.reduce =
+      typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     this.canvas = document.createElement("canvas");
     Object.assign(this.canvas.style, {
@@ -111,8 +123,13 @@ export class FogLayer {
     this.fctx = this.fog.getContext("2d")!;
     this.mask = document.createElement("canvas");
     this.mctx = this.mask.getContext("2d")!;
+    this.reveal = document.createElement("canvas");
+    this.rctx = this.reveal.getContext("2d")!;
+    this.veil = document.createElement("canvas");
+    this.vctx = this.veil.getContext("2d")!;
 
     this.schedule = this.schedule.bind(this);
+    this.driftTick = this.driftTick.bind(this);
     map.on("move", this.schedule);
     map.on("moveend", this.schedule);
     map.on("zoom", this.schedule);
@@ -121,6 +138,7 @@ export class FogLayer {
     this.ro.observe(map.getCanvasContainer());
 
     this.resize();
+    this.startDrift();
   }
 
   setData(cells: Cell[], pins: Pin[]) {
@@ -139,6 +157,7 @@ export class FogLayer {
 
   destroy() {
     cancelAnimationFrame(this.raf);
+    cancelAnimationFrame(this.driftRaf);
     this.map.off("move", this.schedule);
     this.map.off("moveend", this.schedule);
     this.map.off("zoom", this.schedule);
@@ -187,8 +206,46 @@ export class FogLayer {
       this.fog.height = fh;
       this.mask.width = fw;
       this.mask.height = fh;
+      this.reveal.width = fw;
+      this.reveal.height = fh;
+      this.buildVeil(fw, fh);
     }
     return mc.clientWidth > 0 ? mc.width / mc.clientWidth : 1;
+  }
+
+  /** Build the drifting cloud texture once per size, at mask resolution + margin. */
+  private buildVeil(fw: number, fh: number) {
+    const vw = fw + VEIL_MARGIN * 2;
+    const vh = fh + VEIL_MARGIN * 2;
+    this.veil.width = vw;
+    this.veil.height = vh;
+
+    const field = fbm(vw, vh, 1234);
+    const out = this.vctx.createImageData(vw, vh);
+    const d = field.data;
+    const o = out.data;
+    const [pr, pg, pb] = VEIL_PAPER;
+    const [sr, sg, sb] = VEIL_SHADOW;
+    const [wr, wg, wb] = VEIL_WISP;
+    for (let i = 0; i < vw * vh; i++) {
+      const n = d[i * 4] / 255;
+      let t = 0.5 + (n - 0.5) * VEIL_CONTRAST;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      let r = sr + (pr - sr) * t;
+      let g = sg + (pg - sg) * t;
+      let b = sb + (pb - sb) * t;
+      if (VEIL_WISP_STRENGTH > 0 && n > 0.6) {
+        const wf = ((n - 0.6) / 0.4) * VEIL_WISP_STRENGTH;
+        r += (wr - r) * wf;
+        g += (wg - g) * wf;
+        b += (wb - b) * wf;
+      }
+      o[i * 4] = r;
+      o[i * 4 + 1] = g;
+      o[i * 4 + 2] = b;
+      o[i * 4 + 3] = 255;
+    }
+    this.vctx.putImageData(out, 0, 0);
   }
 
   private pixelsPerMeter(scale: number): number {
@@ -200,15 +257,11 @@ export class FogLayer {
     return (Math.hypot(p2.x - p1.x, p2.y - p1.y) / d) * scale;
   }
 
+  /** Rebuild the coverage mask + reveal alpha (only needed on move / data / resize). */
   private render() {
     const scale = this.resize();
-    const W = this.canvas.width;
-    const H = this.canvas.height;
     const ctx = this.ctx;
-    const fctx = this.fctx;
     const mctx = this.mctx;
-    // Mask/fog work at 1/MASK_DOWNSCALE resolution. `ms` maps a projected CSS
-    // coordinate straight into mask pixels; device sizes convert with `/ scl`.
     const fw = this.mask.width;
     const fh = this.mask.height;
     const ms = scale / MASK_DOWNSCALE;
@@ -219,24 +272,19 @@ export class FogLayer {
       this.levels.find((l) => l.edgeM * ppm >= minPx) ?? this.levels[this.levels.length - 1];
     const edgePx = level ? level.edgeM * ppm : 8;
 
-    // Layer softness in mask pixels.
     const coreBlur = Math.max(CORE_BLUR_MIN * scale, edgePx * CORE_BLUR_EDGE) / MASK_DOWNSCALE;
     const haloBlur =
       ((HALO_BLUR_BASE + this.settings.fade * HALO_BLUR_SPREAD) * scale + edgePx * HALO_BLUR_EDGE) /
       MASK_DOWNSCALE;
-    const reachPx = coreBlur + haloBlur; // for viewport culling
+    const reachPx = coreBlur + haloBlur;
 
     // ---- 1. Coverage mask: a disc per explored cell + pins, solid, at low res.
-    // Overlapping discs union into smooth, organic shapes with no hexagon edges.
     mctx.setTransform(1, 0, 0, 1, 0, 0);
     mctx.globalCompositeOperation = "source-over";
     mctx.clearRect(0, 0, fw, fh);
     mctx.fillStyle = "#fff";
 
     if (level && level.centers.length) {
-      // Affine mercator→screen transform from two projected reference points
-      // (exact for the app's north-up, unpitched map): screen = a·merc + b. Lets
-      // us place every centre with two multiplies instead of a projection call.
       const c = this.map.getCenter();
       const [m0x, m0y] = lngLatToMerc(c.lng, c.lat);
       const dxDeg = 0.05;
@@ -248,13 +296,10 @@ export class FogLayer {
       const bx = p0.x * ms - ax * m0x;
       const by = p0.y * ms - ay * m0y;
 
-      // Disc radius in mask pixels (never smaller than the min-draw size).
       const r = Math.max(minPx * DISC_R, edgePx * DISC_R) / MASK_DOWNSCALE;
 
-      // Viewport bounds padded by a disc + the glow reach, in degrees.
       const b = this.map.getBounds();
-      const latPad =
-        (edgePx * DISC_R + reachPx * MASK_DOWNSCALE) / Math.max(ppm, 1e-9) / 111320;
+      const latPad = (edgePx * DISC_R + reachPx * MASK_DOWNSCALE) / Math.max(ppm, 1e-9) / 111320;
       const lngPad = latPad / Math.max(0.15, Math.cos((c.lat * Math.PI) / 180));
       const west = b.getWest() - lngPad;
       const east = b.getEast() + lngPad;
@@ -276,7 +321,6 @@ export class FogLayer {
       mctx.fill();
     }
 
-    // Pins share the mask, so they paint with the same material as explored land.
     for (const pin of this.pins) {
       const p = this.map.project([pin.lng, pin.lat]);
       const x = p.x * ms;
@@ -289,35 +333,125 @@ export class FogLayer {
       mctx.fill();
     }
 
-    // ---- 2. Veil, then cut the two layers out of it. ----
+    // ---- 2. Reveal alpha: soft core (full) + translucent halo, from the mask.
+    // Precomputing this once per move means each drift frame is just two draws.
+    const rctx = this.rctx;
+    rctx.setTransform(1, 0, 0, 1, 0, 0);
+    rctx.globalCompositeOperation = "source-over";
+    rctx.globalAlpha = 1;
+    rctx.filter = "none";
+    rctx.clearRect(0, 0, fw, fh);
+    rctx.filter = coreBlur > 0.3 ? `blur(${coreBlur}px)` : "none";
+    rctx.globalAlpha = 1;
+    rctx.drawImage(this.mask, 0, 0);
+    rctx.filter = `blur(${haloBlur}px)`;
+    rctx.globalAlpha = HALO_ALPHA;
+    rctx.drawImage(this.mask, 0, 0);
+    rctx.filter = "none";
+    rctx.globalAlpha = 1;
+
+    // ---- 3. Composite the cloud veil with the reveal cut out.
+    this.composite(this.reduce ? 0 : performance.now());
+    void ctx;
+  }
+
+  /** Draw the drifting clouds, cut the reveal out, scale up to the visible canvas. */
+  private composite(t: number) {
+    const fctx = this.fctx;
+    const fw = this.fog.width;
+    const fh = this.fog.height;
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+
+    const amp = this.reduce ? 0 : DRIFT_AMP;
+    const dx = amp ? Math.sin(t * 0.00006 * DRIFT_SPEED) * amp : 0;
+    const dy = amp ? Math.cos(t * 0.00004 * DRIFT_SPEED) * amp : 0;
+
+    const density = Math.max(0, Math.min(1, this.settings.darkness));
+
     fctx.setTransform(1, 0, 0, 1, 0, 0);
     fctx.globalCompositeOperation = "source-over";
-    fctx.globalAlpha = 1;
     fctx.filter = "none";
     fctx.clearRect(0, 0, fw, fh);
-    fctx.fillStyle = `rgba(${VEIL_RGB},${this.settings.darkness})`;
-    fctx.fillRect(0, 0, fw, fh);
-
+    // The clouds hide the world; density (the "darkness" setting) controls how
+    // completely, so a little of the paper can still glow through if desired.
+    fctx.globalAlpha = density;
+    fctx.drawImage(this.veil, -VEIL_MARGIN + dx, -VEIL_MARGIN + dy);
+    fctx.globalAlpha = 1;
+    // Lift the clouds over everywhere you've explored.
     fctx.globalCompositeOperation = "destination-out";
-    // Core: lift the veil over the footprint through a single wide blur, so the
-    // edge dissolves gradually into the grey with almost no hard boundary. Discs
-    // overlap enough (DISC_R) that this blur can't bead a thin route.
-    fctx.globalAlpha = 1;
-    fctx.filter = coreBlur > 0.3 ? `blur(${coreBlur}px)` : "none";
-    fctx.drawImage(this.mask, 0, 0);
-    // Halo: partially lift a wide, soft glow that fades into the dark.
-    fctx.globalAlpha = HALO_ALPHA;
-    fctx.filter = `blur(${haloBlur}px)`;
-    fctx.drawImage(this.mask, 0, 0);
-
+    fctx.drawImage(this.reveal, 0, 0);
     fctx.globalCompositeOperation = "source-over";
-    fctx.globalAlpha = 1;
-    fctx.filter = "none";
 
-    // ---- 3. Scale the soft fog up onto the visible canvas. ----
+    const ctx = this.ctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, W, H);
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(this.fog, 0, 0, fw, fh, 0, 0, W, H);
   }
+
+  /** Slow, throttled cloud drift. Paused when the tab is hidden or motion is reduced. */
+  private startDrift() {
+    if (this.reduce || DRIFT_AMP <= 0) return;
+    this.driftRaf = requestAnimationFrame(this.driftTick);
+  }
+
+  private driftTick(t: number) {
+    this.driftRaf = requestAnimationFrame(this.driftTick);
+    if (t - this.lastDrift < 1000 / DRIFT_FPS) return;
+    this.lastDrift = t;
+    if (typeof document !== "undefined" && document.hidden) return;
+    // Only the veil offset changes; the reveal + mask are reused as-is.
+    this.composite(t);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fractal cloud field: stacked bilinear-upscaled random noise, in [0,255] on the
+// red channel. Cheap, and generated once per resize.
+function fbm(w: number, h: number, seed: number): ImageData {
+  const acc = document.createElement("canvas");
+  acc.width = w;
+  acc.height = h;
+  const ax = acc.getContext("2d")!;
+  const octs: Array<[number, number]> = [
+    [5, 0.5],
+    [10, 0.25],
+    [20, 0.15],
+    [40, 0.1],
+  ];
+  ax.globalCompositeOperation = "lighter";
+  octs.forEach((o, oi) => {
+    const cells = o[0];
+    const nw = cells;
+    const nh = Math.max(2, Math.round((cells * h) / w));
+    const n = document.createElement("canvas");
+    n.width = nw;
+    n.height = nh;
+    const nx = n.getContext("2d")!;
+    const id = nx.createImageData(nw, nh);
+    const rnd = mulberry32(seed + oi * 131);
+    for (let i = 0; i < nw * nh; i++) {
+      const v = rnd() * 255;
+      id.data[i * 4] = id.data[i * 4 + 1] = id.data[i * 4 + 2] = v;
+      id.data[i * 4 + 3] = 255;
+    }
+    nx.putImageData(id, 0, 0);
+    ax.globalAlpha = o[1];
+    ax.imageSmoothingEnabled = true;
+    ax.drawImage(n, 0, 0, w, h);
+  });
+  ax.globalAlpha = 1;
+  ax.globalCompositeOperation = "source-over";
+  return ax.getImageData(0, 0, w, h);
+}
+
+function mulberry32(a: number): () => number {
+  return function () {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }

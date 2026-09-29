@@ -10,18 +10,19 @@ import type { StyleSpecification } from "maplibre-gl";
 
 const OFM_STYLE = "https://tiles.openfreemap.org/styles/liberty";
 
-const paper = "#d8c6a0";
-const water = "#a9bdb4";
-const waterLine = "#8fa79c";
-const forest = "#c4cc9c";
-const grass = "#cfd2a4";
-const roadCasing = "#9c7b46";
-const road = "#c7a870";
-const roadMinor = "#cdb68a";
-const boundary = "#7a5c38";
-const building = "#ccb78f";
-const ink = "#4a3720";
-const halo = "rgba(233,224,205,0.85)";
+const paper = "#dbc79c"; // warm aged parchment
+const water = "#9fbcb4"; // muted teal shallows
+const coast = "#6f8a80"; // inked coastline / riverbank
+const waterLine = "#7f9a8f";
+const forest = "#b9c489"; // sage canopy
+const grass = "#cdd2a0";
+const roadCasing = "#8a6a3c"; // darker ink casing
+const road = "#c9a86a";
+const roadMinor = "#cbb583";
+const boundary = "#6f5230";
+const building = "#c9b487";
+const ink = "#43301b";
+const halo = "rgba(236,227,206,0.85)";
 
 /** Parchment layers bound to the given vector source (OpenMapTiles schema). */
 function parchmentLayers(src: string): unknown[] {
@@ -32,8 +33,11 @@ function parchmentLayers(src: string): unknown[] {
     v({ id: "landcover-grass", type: "fill", "source-layer": "landcover", filter: ["in", "class", "grass", "meadow", "scrub"], paint: { "fill-color": grass, "fill-opacity": 0.4 } }),
     v({ id: "landuse-park", type: "fill", "source-layer": "park", paint: { "fill-color": forest, "fill-opacity": 0.4 } }),
     v({ id: "water", type: "fill", "source-layer": "water", paint: { "fill-color": water } }),
+    // Inked coastline: a hand-drawn line along every shore and lake edge, the
+    // single strongest cue that this is a drawn map rather than a web map.
+    v({ id: "water-outline", type: "line", "source-layer": "water", layout: { "line-join": "round" }, paint: { "line-color": coast, "line-opacity": 0.6, "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.4, 9, 1.1, 13, 2.2, 16, 3.2] } }),
     v({ id: "waterway", type: "line", "source-layer": "waterway", paint: { "line-color": waterLine, "line-width": ["interpolate", ["linear"], ["zoom"], 8, 0.6, 14, 2] } }),
-    v({ id: "building", type: "fill", "source-layer": "building", minzoom: 13, paint: { "fill-color": building, "fill-opacity": ["interpolate", ["linear"], ["zoom"], 13, 0, 15, 0.5] } }),
+    v({ id: "building", type: "fill", "source-layer": "building", minzoom: 13, paint: { "fill-color": building, "fill-outline-color": "rgba(101,74,44,0.5)", "fill-opacity": ["interpolate", ["linear"], ["zoom"], 13, 0, 15, 0.55] } }),
     v({ id: "road-casing", type: "line", "source-layer": "transportation", filter: ["in", "class", "motorway", "trunk", "primary", "secondary"], layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": roadCasing, "line-opacity": 0.55, "line-width": ["interpolate", ["linear"], ["zoom"], 6, 0.6, 12, 4, 16, 10] } }),
     v({ id: "road-minor", type: "line", "source-layer": "transportation", minzoom: 12, filter: ["in", "class", "minor", "service", "tertiary", "residential"], layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": roadMinor, "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.4, 16, 3] } }),
     v({ id: "road", type: "line", "source-layer": "transportation", filter: ["in", "class", "motorway", "trunk", "primary", "secondary"], layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": road, "line-width": ["interpolate", ["linear"], ["zoom"], 6, 0.3, 12, 2, 16, 6] } }),

@@ -3,6 +3,7 @@ import maplibregl, { type Map as MlMap } from "maplibre-gl";
 import { getHexagonAreaAvg } from "h3-js";
 import { MapView } from "../map/MapView";
 import { FogLayer } from "../map/FogLayer";
+import { MapChrome } from "./MapChrome";
 import { MenuPanel } from "./MenuPanel";
 import { ImportScreen } from "./ImportScreen";
 import { StravaImport } from "./StravaImport";
@@ -126,6 +127,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
   return (
     <div className="map-app">
       <MapView onReady={onReady} />
+      <MapChrome />
 
       <div className="topbar">
         <div className="brand">
