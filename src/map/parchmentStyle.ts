@@ -21,14 +21,27 @@ const road = "#c9a86a";
 const roadMinor = "#cbb583";
 const boundary = "#6f5230";
 const building = "#c9b487";
-const ink = "#43301b";
-const halo = "rgba(236,227,206,0.85)";
+
+// Free elevation tiles (Terrarium-encoded) for shaded relief. Keyless; the app
+// runs in the browser so fetching these is fine. Missing tiles just mean no
+// hillshade, never a crash.
+const DEM_SOURCE = {
+  type: "raster-dem",
+  tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+  encoding: "terrarium",
+  tileSize: 256,
+  maxzoom: 14,
+  attribution: "Elevation: Terrain Tiles (AWS) — Mapzen, USGS, NASA, NOAA",
+};
 
 /** Parchment layers bound to the given vector source (OpenMapTiles schema). */
 function parchmentLayers(src: string): unknown[] {
   const v = (extra: object) => ({ source: src, "source-layer": "", ...extra });
   return [
     { id: "bg", type: "background", paint: { "background-color": paper } },
+    // Warm shaded relief: real mountains/valleys emerge, tinted like a hand-shaded
+    // old map. Sits under the land features so it reads as texture, not overlay.
+    { id: "hillshade", type: "hillshade", source: "terrainDem", paint: { "hillshade-exaggeration": 0.42, "hillshade-shadow-color": "#5c4526", "hillshade-highlight-color": "#f1e7c9", "hillshade-accent-color": "#6d5531", "hillshade-illumination-direction": 315 } },
     v({ id: "landcover-wood", type: "fill", "source-layer": "landcover", filter: ["==", "class", "wood"], paint: { "fill-color": forest, "fill-opacity": 0.45 } }),
     v({ id: "landcover-grass", type: "fill", "source-layer": "landcover", filter: ["in", "class", "grass", "meadow", "scrub"], paint: { "fill-color": grass, "fill-opacity": 0.4 } }),
     v({ id: "landuse-park", type: "fill", "source-layer": "park", paint: { "fill-color": forest, "fill-opacity": 0.4 } }),
@@ -43,20 +56,8 @@ function parchmentLayers(src: string): unknown[] {
     v({ id: "road", type: "line", "source-layer": "transportation", filter: ["in", "class", "motorway", "trunk", "primary", "secondary"], layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": road, "line-width": ["interpolate", ["linear"], ["zoom"], 6, 0.3, 12, 2, 16, 6] } }),
     v({ id: "boundary", type: "line", "source-layer": "boundary", filter: ["<=", "admin_level", 2], paint: { "line-color": boundary, "line-opacity": 0.6, "line-dasharray": [3, 2], "line-width": ["interpolate", ["linear"], ["zoom"], 3, 0.6, 8, 1.6] } }),
     v({ id: "boundary-state", type: "line", "source-layer": "boundary", minzoom: 4, filter: ["==", "admin_level", 4], paint: { "line-color": boundary, "line-opacity": 0.3, "line-dasharray": [2, 3], "line-width": 0.8 } }),
-    v({ id: "place-water", type: "symbol", "source-layer": "water_name", layout: { "text-field": ["get", "name"], "text-font": ["Noto Sans Italic"], "text-size": ["interpolate", ["linear"], ["zoom"], 4, 10, 10, 14], "text-letter-spacing": 0.1 }, paint: { "text-color": waterLine, "text-halo-color": halo, "text-halo-width": 1 } }),
-    v({
-      id: "place-labels", type: "symbol", "source-layer": "place",
-      filter: ["in", "class", "city", "town", "village", "country", "state"],
-      layout: {
-        "text-field": ["get", "name"],
-        "text-font": ["Noto Sans Regular"],
-        "text-size": ["interpolate", ["linear"], ["zoom"], 3, ["match", ["get", "class"], "country", 12, 9], 10, ["match", ["get", "class"], "country", 20, ["match", ["get", "class"], "city", 17, 13]]],
-        "text-transform": ["match", ["get", "class"], "country", "uppercase", "none"],
-        "text-letter-spacing": ["match", ["get", "class"], "country", 0.2, 0.02],
-        "text-max-width": 7,
-      },
-      paint: { "text-color": ink, "text-halo-color": halo, "text-halo-width": 1.4 },
-    }),
+    // Place + water labels are drawn by LabelLayer (engraved web fonts) instead of
+    // MapLibre's glyph labels, so they aren't defined here.
   ];
 }
 
@@ -65,7 +66,10 @@ function fallbackStyle(): StyleSpecification {
   const style = {
     version: 8,
     glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
-    sources: { openmaptiles: { type: "vector", url: "https://tiles.openfreemap.org/planet" } },
+    sources: {
+      openmaptiles: { type: "vector", url: "https://tiles.openfreemap.org/planet" },
+      terrainDem: DEM_SOURCE,
+    },
     layers: parchmentLayers("openmaptiles"),
   };
   return style as unknown as StyleSpecification;
@@ -80,7 +84,7 @@ export async function buildParchmentStyle(): Promise<StyleSpecification> {
       version: 8,
       glyphs: base.glyphs,
       sprite: base.sprite,
-      sources: base.sources,
+      sources: { ...base.sources, terrainDem: DEM_SOURCE },
       layers: parchmentLayers(srcName),
     };
     return style as unknown as StyleSpecification;
