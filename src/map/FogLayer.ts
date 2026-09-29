@@ -67,6 +67,19 @@ interface Level {
   cov: Float64Array;
 }
 
+/** Per-frame view transform + zoom-derived params, passed to the level builder. */
+interface Affine {
+  ax: number;
+  ay: number;
+  bx: number;
+  by: number;
+  scale: number;
+  minPx: number;
+  ppm: number;
+  cLat: number;
+  P: ReturnType<typeof fogParamsForZoom>;
+}
+
 // Web-Mercator projection to the unit square [0,1]², matching MapLibre. Doing this
 // once per cell lets each frame convert a vertex to screen space with a couple of
 // multiplies instead of a full map.project() call.
@@ -97,6 +110,9 @@ export class FogLayer {
   private mctx: CanvasRenderingContext2D;
   private reveal: HTMLCanvasElement;
   private rctx: CanvasRenderingContext2D;
+  private revB: HTMLCanvasElement;
+  private rctxB: CanvasRenderingContext2D;
+  private blendT = 0;
   private veil: HTMLCanvasElement;
   private vctx: CanvasRenderingContext2D;
   private wrev: HTMLCanvasElement;
@@ -149,6 +165,8 @@ export class FogLayer {
     this.mctx = this.mask.getContext("2d")!;
     this.reveal = document.createElement("canvas");
     this.rctx = this.reveal.getContext("2d", { willReadFrequently: true })!;
+    this.revB = document.createElement("canvas");
+    this.rctxB = this.revB.getContext("2d", { willReadFrequently: true })!;
     this.veil = document.createElement("canvas");
     this.vctx = this.veil.getContext("2d")!;
     this.wrev = document.createElement("canvas");
@@ -257,6 +275,8 @@ export class FogLayer {
       this.mask.height = fh;
       this.reveal.width = fw;
       this.reveal.height = fh;
+      this.revB.width = fw;
+      this.revB.height = fh;
       this.wrev.width = fw;
       this.wrev.height = fh;
       this.wtmp.width = fw;
@@ -312,35 +332,20 @@ export class FogLayer {
     return (Math.hypot(p2.x - p1.x, p2.y - p1.y) / d) * scale;
   }
 
-  /** Rebuild the coverage mask + reveal alpha (only needed on move / data / resize). */
+  /** Rebuild the reveal alpha(s) for the current view (on move / data / resize). */
   private render() {
     const scale = this.resize();
-    const ctx = this.ctx;
-    const mctx = this.mctx;
     const fw = this.mask.width;
     const fh = this.mask.height;
     const ms = scale / MASK_DOWNSCALE;
-
     const ppm = this.pixelsPerMeter(scale);
     const minPx = MIN_DRAW_CSS * scale;
-    const level =
-      this.levels.find((l) => l.edgeM * ppm >= minPx) ?? this.levels[this.levels.length - 1];
-    const edgePx = level ? level.edgeM * ppm : 8;
 
-    const coreBlur = Math.max(CORE_BLUR_MIN * scale, edgePx * this.tuning.coreEdge) / MASK_DOWNSCALE;
-    const haloBlur =
-      ((HALO_BLUR_BASE + this.settings.fade * HALO_BLUR_SPREAD) * scale + edgePx * HALO_BLUR_EDGE) /
-      MASK_DOWNSCALE;
-    const reachPx = coreBlur + haloBlur;
+    // All shape parameters follow a zoom-driven curve, so the fog stays right at
+    // every scale from one formula instead of one compromise value.
+    const P = fogParamsForZoom(this.map.getZoom());
 
-    // ---- 1. Coverage mask: a disc per explored cell + pins, solid, at low res.
-    mctx.setTransform(1, 0, 0, 1, 0, 0);
-    mctx.globalCompositeOperation = "source-over";
-    mctx.clearRect(0, 0, fw, fh);
-    mctx.fillStyle = "#fff";
-
-    // Affine mercator→mask transform (depends only on the map view, not the
-    // data). Used for both explored cells and the water polygons.
+    // Affine mercator→mask transform (view-only), shared by cells and water.
     const c = this.map.getCenter();
     const [m0x, m0y] = lngLatToMerc(c.lng, c.lat);
     const dxDeg = 0.05;
@@ -351,28 +356,78 @@ export class FogLayer {
     const ay = ((p1.y - p0.y) / (m1y - m0y)) * ms;
     const bx = p0.x * ms - ax * m0x;
     const by = p0.y * ms - ay * m0y;
+    const aff: Affine = { ax, ay, bx, by, scale, minPx, ppm, cLat: c.lat, P };
 
-    if (level && level.centers.length) {
-      // Two radii, whichever is larger:
-      //  • the honest footprint — disc area ∝ how much of the aggregated cell is
-      //    actually explored, so a lightly-visited coarse cell doesn't balloon;
-      //  • a fixed on-screen minimum mark so exploration stays visible when zoomed
-      //    right out, sized to survive the edge blur (a smaller dot just washes
-      //    out against the fog). The min mark is a fixed screen size, not the
-      //    coarse cell's size, so it stays a modest dot rather than a whole region.
-      // Zoomed in, the footprint wins; zoomed out, the mark wins — both covered.
-      const fullR = (edgePx * this.tuning.discR) / MASK_DOWNSCALE;
-      const g = Math.max(-1, Math.min(1, this.settings.generosity ?? 0.65));
-      // Min mark = a blur-survival floor (so it's visible at all) PLUS a
-      // generosity-driven amount. Adding rather than max()-ing means generosity
-      // moves the dot size across its whole range instead of being swamped by the
-      // floor. Zoomed in, the honest footprint (below) dwarfs this, so no effect.
-      const minMark = coreBlur * this.tuning.markSurvive + (g * 16 * scale) / MASK_DOWNSCALE;
+    // ---- Pick the two aggregation levels bracketing this zoom and cross-fade
+    // between them, so the footprint morphs smoothly instead of jumping when the
+    // H3 level would switch. REF is the on-screen edge size we aim each level at.
+    const REF = minPx * 1.63;
+    const levels = this.levels;
+    if (levels.length === 0) {
+      this.rctx.clearRect(0, 0, fw, fh);
+      this.rctxB.clearRect(0, 0, fw, fh);
+      this.blendT = 0;
+    } else {
+      let bi = -1; // finest index whose on-screen edge is still <= REF
+      for (let i = 0; i < levels.length; i++) {
+        if (levels[i].edgeM * ppm <= REF) bi = i;
+        else break;
+      }
+      if (bi < 0) {
+        this.buildLevelReveal(levels[0], aff, this.rctx, fw, fh);
+        this.rctxB.clearRect(0, 0, fw, fh);
+        this.blendT = 0;
+      } else if (bi >= levels.length - 1) {
+        this.buildLevelReveal(levels[levels.length - 1], aff, this.rctx, fw, fh);
+        this.rctxB.clearRect(0, 0, fw, fh);
+        this.blendT = 0;
+      } else {
+        const finer = levels[bi];
+        const coarser = levels[bi + 1];
+        const ea = coarser.edgeM * ppm;
+        const eb = finer.edgeM * ppm;
+        let t = (Math.log(ea) - Math.log(REF)) / (Math.log(ea) - Math.log(eb));
+        t = Math.max(0, Math.min(1, t));
+        this.buildLevelReveal(coarser, aff, this.rctx, fw, fh); // weight 1 - t
+        this.buildLevelReveal(finer, aff, this.rctxB, fw, fh); // weight t
+        this.blendT = t;
+      }
+    }
+
+    // ---- Water: reveal open sea, eroded inward from every coast by a margin.
+    const src = this.vectorSource();
+    if (src) this.buildWaterReveal(src, ax, ay, bx, by, WATER_MARGIN_CSS * ms);
+    else this.clearWater();
+
+    this.composite(this.reduce ? 0 : performance.now());
+  }
+
+  /** Rasterise one aggregation level into a reveal alpha canvas (discs + pins,
+   *  coverage/min-mark sizing, hole closing, soft core + halo). */
+  private buildLevelReveal(level: Level, aff: Affine, targetCtx: CanvasRenderingContext2D, fw: number, fh: number) {
+    const { ax, ay, bx, by, scale, minPx, ppm, cLat, P } = aff;
+    const mctx = this.mctx;
+    const ms = scale / MASK_DOWNSCALE;
+    const edgePx = level.edgeM * ppm;
+    const coreBlur = Math.max(CORE_BLUR_MIN * scale, edgePx * P.coreEdge) / MASK_DOWNSCALE;
+    const haloBlur =
+      ((HALO_BLUR_BASE + P.fade * HALO_BLUR_SPREAD) * scale + edgePx * HALO_BLUR_EDGE) / MASK_DOWNSCALE;
+    const reachPx = coreBlur + haloBlur;
+
+    mctx.setTransform(1, 0, 0, 1, 0, 0);
+    mctx.globalCompositeOperation = "source-over";
+    mctx.filter = "none";
+    mctx.clearRect(0, 0, fw, fh);
+    mctx.fillStyle = "#fff";
+
+    if (level.centers.length) {
+      const fullR = (edgePx * P.discR) / MASK_DOWNSCALE;
+      const g = Math.max(-1, Math.min(1, P.generosity));
+      const minMark = coreBlur * P.markSurvive + (g * 16 * scale) / MASK_DOWNSCALE;
 
       const b = this.map.getBounds();
-      const latPad =
-        (edgePx * this.tuning.discR + reachPx * MASK_DOWNSCALE) / Math.max(ppm, 1e-9) / 111320;
-      const lngPad = latPad / Math.max(0.15, Math.cos((c.lat * Math.PI) / 180));
+      const latPad = (edgePx * P.discR + reachPx * MASK_DOWNSCALE) / Math.max(ppm, 1e-9) / 111320;
+      const lngPad = latPad / Math.max(0.15, Math.cos((cLat * Math.PI) / 180));
       const west = b.getWest() - lngPad;
       const east = b.getEast() + lngPad;
       const south = b.getSouth() - latPad;
@@ -407,34 +462,17 @@ export class FogLayer {
       mctx.fill();
     }
 
-    // ---- 1b. Close small interior holes (morphological closing) so a fully
-    // surrounded pocket fills in and dense areas read as clean explored regions.
-    const closeRad = Math.min(8, (edgePx * 0.5) / MASK_DOWNSCALE) * this.tuning.closeScale;
+    const closeRad = Math.min(8, (edgePx * 0.5) / MASK_DOWNSCALE) * P.closeScale;
     if (closeRad >= 1.2) this.closeMask(closeRad, fw, fh);
 
-    // ---- 2. Reveal alpha: soft core (full) + translucent halo, from the mask.
-    // Precomputing this once per move means each drift frame is just two draws.
-    const rctx = this.rctx;
-    rctx.setTransform(1, 0, 0, 1, 0, 0);
-    rctx.globalCompositeOperation = "source-over";
-    rctx.globalAlpha = 1;
-    rctx.filter = "none";
-    rctx.clearRect(0, 0, fw, fh);
-    // Soft core (full) + translucent halo. Blur via ctx.filter where it works
-    // (desktop), else a downscale/upscale blur that also softens on iOS Safari,
-    // where canvas ctx.filter is unsupported and would leave hard edges.
-    this.blurDraw(rctx, this.mask, coreBlur, 1);
-    this.blurDraw(rctx, this.mask, haloBlur, this.tuning.haloAlpha);
-    rctx.globalAlpha = 1;
-
-    // ---- 2b. Water: reveal open sea, eroded inward from every coast by a margin.
-    const src = this.vectorSource();
-    if (src) this.buildWaterReveal(src, ax, ay, bx, by, WATER_MARGIN_CSS * ms);
-    else this.clearWater();
-
-    // ---- 3. Composite the cloud veil with the reveals cut out.
-    this.composite(this.reduce ? 0 : performance.now());
-    void ctx;
+    targetCtx.setTransform(1, 0, 0, 1, 0, 0);
+    targetCtx.globalCompositeOperation = "source-over";
+    targetCtx.globalAlpha = 1;
+    targetCtx.filter = "none";
+    targetCtx.clearRect(0, 0, fw, fh);
+    this.blurInto(targetCtx, fw, fh, this.mask, coreBlur, 1);
+    this.blurInto(targetCtx, fw, fh, this.mask, haloBlur, P.haloAlpha);
+    targetCtx.globalAlpha = 1;
   }
 
   /** Draw the drifting clouds, cut the reveal out, scale up to the visible canvas. */
@@ -460,10 +498,17 @@ export class FogLayer {
     fctx.globalAlpha = density;
     fctx.drawImage(this.veil, -VEIL_MARGIN + dx, -VEIL_MARGIN + dy);
     fctx.globalAlpha = 1;
-    // Lift the clouds over the open sea, then over everywhere you've explored.
+    // Lift the clouds over the open sea, then over everywhere you've explored —
+    // cross-fading the two aggregation levels (weights 1-t and t) so the footprint
+    // morphs smoothly across zoom instead of jumping when the level switches.
     fctx.globalCompositeOperation = "destination-out";
+    fctx.globalAlpha = 1;
     fctx.drawImage(this.wrev, 0, 0);
+    fctx.globalAlpha = 1 - this.blendT;
     fctx.drawImage(this.reveal, 0, 0);
+    fctx.globalAlpha = this.blendT;
+    fctx.drawImage(this.revB, 0, 0);
+    fctx.globalAlpha = 1;
     fctx.globalCompositeOperation = "source-over";
 
     const ctx = this.ctx;
@@ -488,16 +533,16 @@ export class FogLayer {
     this.composite(t);
   }
 
-  /** Draw `src` blurred by `radius` (mask px) into rctx at `alpha`. Uses
-   *  ctx.filter where supported, else a downscale/upscale blur for iOS Safari. */
-  private blurDraw(
+  /** Draw `src` blurred by `radius` (mask px) into `dctx` (size W×H) at `alpha`.
+   *  Uses ctx.filter where supported, else a downscale/upscale blur for iOS. */
+  private blurInto(
     dctx: CanvasRenderingContext2D,
+    W: number,
+    H: number,
     src: HTMLCanvasElement,
     radius: number,
     alpha: number,
   ) {
-    const W = this.reveal.width;
-    const H = this.reveal.height;
     dctx.globalAlpha = alpha;
     if (ctxFilterSupported()) {
       dctx.filter = radius > 0.3 ? `blur(${radius}px)` : "none";
@@ -561,7 +606,10 @@ export class FogLayer {
     const sy = Math.round((p.y / ch) * fh);
     if (sx < 0 || sy < 0 || sx >= fw || sy >= fh) return false;
     try {
-      if (this.rctx.getImageData(sx, sy, 1, 1).data[3] > 45) return true;
+      const a =
+        (1 - this.blendT) * this.rctx.getImageData(sx, sy, 1, 1).data[3] +
+        this.blendT * this.rctxB.getImageData(sx, sy, 1, 1).data[3];
+      if (a > 45) return true;
       return this.wctx.getImageData(sx, sy, 1, 1).data[3] > 45;
     } catch {
       return true; // if pixel readback is blocked, don't hide the label
@@ -766,6 +814,46 @@ function ctxFilterSupported(): boolean {
     _ctxFilter = false;
   }
   return _ctxFilter;
+}
+
+// ---------------------------------------------------------------------------
+// Zoom-driven fog parameters. Each is a smooth curve fitted to hand-tuned sweet
+// spots across zooms, so the fog stays right at every scale without hardcoding a
+// single compromise value. Piecewise-linear between anchor [zoom, value] points.
+function interp(pts: number[][], x: number): number {
+  if (x <= pts[0][0]) return pts[0][1];
+  const n = pts.length;
+  if (x >= pts[n - 1][0]) return pts[n - 1][1];
+  for (let i = 1; i < n; i++) {
+    if (x <= pts[i][0]) {
+      const x0 = pts[i - 1][0];
+      const y0 = pts[i - 1][1];
+      const x1 = pts[i][0];
+      const y1 = pts[i][1];
+      return y0 + ((y1 - y0) * (x - x0)) / (x1 - x0);
+    }
+  }
+  return pts[n - 1][1];
+}
+
+const A_GEN = [[2, -0.64], [3, -0.24], [4, 0.05], [5, 0.45], [6, 0.9], [8, 1.0], [12, 1.0]];
+const A_FADE = [[2, 0.26], [3, 0.37], [9, 0.37], [10.5, 0.63], [12, 0.63]];
+const A_DISC = [[2, 1.04], [3, 1.17], [9, 1.17], [11, 1.24], [12, 1.24]];
+const A_CORE = [[2, 0.6], [3, 0.64], [12, 0.64]];
+const A_SURV = [[2, 2.6], [4.7, 2.6], [6.3, 2.4], [7.4, 1.9], [8.6, 1.6], [10.4, 1.9], [11.3, 2.15], [12, 2.15]];
+const A_CLOSE = [[2, 2.0], [3, 2.0], [4.7, 1.5], [5, 1.35], [6.3, 1.7], [8.6, 1.65], [10.4, 2.0], [12, 2.0]];
+const A_HALO = [[2, 0.34], [3, 0.44], [9, 0.44], [10.4, 0.38], [12, 0.38]];
+
+function fogParamsForZoom(z: number) {
+  return {
+    generosity: interp(A_GEN, z),
+    fade: interp(A_FADE, z),
+    discR: interp(A_DISC, z),
+    coreEdge: interp(A_CORE, z),
+    markSurvive: interp(A_SURV, z),
+    closeScale: interp(A_CLOSE, z),
+    haloAlpha: interp(A_HALO, z),
+  };
 }
 
 function mulberry32(a: number): () => number {
