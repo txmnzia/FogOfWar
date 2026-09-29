@@ -479,17 +479,36 @@ export class FogLayer {
     wt.globalAlpha = 1;
     wt.clearRect(0, 0, fw, fh);
     wt.fillStyle = "#fff";
+    // At low zoom the viewport can span more than one copy of the world (the map
+    // wraps horizontally). Water features come back only for longitudes −180…180,
+    // so draw each one shifted by whole worlds (±360°) to cover every visible
+    // copy — otherwise the wrapped edges stay fogged as vertical side bands.
+    const worldPx = ax; // 360° of longitude, in mask px
+    let kmin = 0;
+    let kmax = 0;
+    if (worldPx > 0.5) {
+      kmin = Math.floor((0 - bx) / worldPx) - 1;
+      kmax = Math.floor((fw - bx) / worldPx) + 1;
+      if (kmax - kmin > 12) {
+        kmin = 0;
+        kmax = 0;
+      }
+    }
     for (const f of feats) {
       const g = f.geometry;
-      if (g.type === "Polygon") {
-        wt.beginPath();
-        this.addRings(wt, g.coordinates, ax, ay, bx, by);
-        wt.fill("evenodd");
-      } else if (g.type === "MultiPolygon") {
-        for (const poly of g.coordinates) {
+      if (g.type !== "Polygon" && g.type !== "MultiPolygon") continue;
+      for (let k = kmin; k <= kmax; k++) {
+        const bxo = bx + k * worldPx;
+        if (g.type === "Polygon") {
           wt.beginPath();
-          this.addRings(wt, poly, ax, ay, bx, by);
+          this.addRings(wt, g.coordinates, ax, ay, bxo, by);
           wt.fill("evenodd");
+        } else {
+          for (const poly of g.coordinates) {
+            wt.beginPath();
+            this.addRings(wt, poly, ax, ay, bxo, by);
+            wt.fill("evenodd");
+          }
         }
       }
     }
