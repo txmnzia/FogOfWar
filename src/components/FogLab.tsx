@@ -91,17 +91,22 @@ export function FogLab({ settings, onSettings, fog, map, onClose }: Props) {
         </button>
       </div>
       <p className="hint">
-        Live on your real map — pan and zoom, tune, and note if a value should differ by zoom.{" "}
-        <b>Zoom {zoom.toFixed(1)}</b>
+        Live on your real map. <b>Zoom {zoom.toFixed(1)}</b>
       </p>
 
+      <p className="lab-h">Zoomed-out footprint · zoom out to see these</p>
       <Slider label="Low-zoom coverage" v={settings.generosity} bounds={SETTINGS_BOUNDS.generosity} pct onChange={(v) => onSettings({ ...settings, generosity: v })} />
+      <Slider label="Min-mark blur survival" v={tuning.markSurvive} bounds={TBOUNDS.markSurvive} onChange={(v) => changeT("markSurvive", v)} />
+
+      <p className="lab-h">Look · any zoom</p>
+      <Slider label="Edge softness (core)" v={tuning.coreEdge} bounds={TBOUNDS.coreEdge} onChange={(v) => changeT("coreEdge", v)} />
+      <Slider label="Disc overlap" v={tuning.discR} bounds={TBOUNDS.discR} onChange={(v) => changeT("discR", v)} />
       <Slider label="Halo fade" v={settings.fade} bounds={SETTINGS_BOUNDS.fade} pct onChange={(v) => onSettings({ ...settings, fade: v })} />
+      <Slider label="Halo glow" v={tuning.haloAlpha} bounds={TBOUNDS.haloAlpha} onChange={(v) => changeT("haloAlpha", v)} />
       <Slider label="Cloud density" v={settings.darkness} bounds={SETTINGS_BOUNDS.darkness} pct onChange={(v) => onSettings({ ...settings, darkness: v })} />
 
-      {(Object.keys(TBOUNDS) as (keyof Tuning)[]).map((k) => (
-        <Slider key={k} label={TBOUNDS[k].label} v={tuning[k]} bounds={TBOUNDS[k]} onChange={(v) => changeT(k, v)} />
-      ))}
+      <p className="lab-h">Cleanup · only where there are gaps</p>
+      <Slider label="Hole closing" v={tuning.closeScale} bounds={TBOUNDS.closeScale} onChange={(v) => changeT("closeScale", v)} />
 
       <button className="btn ghost block" style={{ marginTop: 12 }} onClick={copy}>
         Copy values
