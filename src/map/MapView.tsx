@@ -44,7 +44,18 @@ export function MapView({ onReady, onClick }: Props) {
         "bottom-left",
       );
       map.on("click", (e) => onClickRef.current?.({ lng: e.lngLat.lng, lat: e.lngLat.lat }));
-      map.on("load", () => onReadyRef.current(map!));
+
+      // Don't let the user zoom out past the point where the world stops filling
+      // the viewport — beyond that the map shows empty margins the fog can't cover.
+      const applyMinZoom = () => {
+        const h = map!.getContainer().clientHeight;
+        if (h > 0) map!.setMinZoom(Math.max(0, Math.log2(h / 512) + 0.05));
+      };
+      map.on("resize", applyMinZoom);
+      map.on("load", () => {
+        applyMinZoom();
+        onReadyRef.current(map!);
+      });
     });
 
     return () => {
