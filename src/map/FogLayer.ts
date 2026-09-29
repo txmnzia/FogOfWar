@@ -336,12 +336,17 @@ export class FogLayer {
     const by = p0.y * ms - ay * m0y;
 
     if (level && level.centers.length) {
-      // Disc area ∝ how much of the aggregated cell is actually explored, so the
-      // lit footprint stays honest when zoomed out (a lightly-visited coarse cell
-      // no longer balloons to its full size). A small floor keeps single spots
-      // visible as a dot.
+      // Two radii, whichever is larger:
+      //  • the honest footprint — disc area ∝ how much of the aggregated cell is
+      //    actually explored, so a lightly-visited coarse cell doesn't balloon;
+      //  • a fixed on-screen minimum mark so exploration stays visible when zoomed
+      //    right out, sized to survive the edge blur (a smaller dot just washes
+      //    out against the fog). The min mark is a fixed screen size, not the
+      //    coarse cell's size, so it stays a modest dot rather than a whole region.
+      // Zoomed in, the footprint wins; zoomed out, the mark wins — both covered.
       const fullR = (edgePx * DISC_R) / MASK_DOWNSCALE;
-      const floorR = Math.max(minPx * 0.42, 1.5 * scale) / MASK_DOWNSCALE;
+      const g = Math.max(0, Math.min(1, this.settings.generosity ?? 0.65));
+      const minMark = Math.max(((3 + g * 9) * scale) / MASK_DOWNSCALE, coreBlur * 1.3);
 
       const b = this.map.getBounds();
       const latPad = (edgePx * DISC_R + reachPx * MASK_DOWNSCALE) / Math.max(ppm, 1e-9) / 111320;
@@ -361,7 +366,7 @@ export class FogLayer {
         if (lat < south || lat > north || lng < west || lng > east) continue;
         const x = ax * cmerc[ci] + bx;
         const y = ay * cmerc[ci + 1] + by;
-        const rr = Math.max(floorR, fullR * Math.sqrt(cov[ci >> 1]));
+        const rr = Math.max(minMark, fullR * Math.sqrt(cov[ci >> 1]));
         mctx.moveTo(x + rr, y);
         mctx.arc(x, y, rr, 0, Math.PI * 2);
       }
