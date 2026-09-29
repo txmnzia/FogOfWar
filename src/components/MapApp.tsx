@@ -129,7 +129,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
 
       <div className="topbar">
         <div className="brand">
-          <img className="mark" src="/icon.svg" alt="" />
+          <img className="mark" src={`${import.meta.env.BASE_URL}icon.svg`} alt="" />
           <div>
             <h1>Fog of War</h1>
             {!usingSample && <span className="lit">{litKm2.toLocaleString()} km² explored</span>}
