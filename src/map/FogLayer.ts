@@ -25,14 +25,14 @@ const MASK_DOWNSCALE = 3;
 // Aged vellum with drifting cloud mottling. Tones are kept a touch lighter and
 // warmer than the parchment basemap so the clouds read as a layer ABOVE the map.
 // (Tunable set — mirrored by the Fog Reveal Studio prototype.)
-const VEIL_PAPER: [number, number, number] = [206, 190, 156]; // base vellum
-const VEIL_SHADOW: [number, number, number] = [156, 139, 107]; // low mottling
-const VEIL_WISP: [number, number, number] = [240, 236, 226]; // cloud highlights
-const VEIL_CONTRAST = 0.85; // spread of the cloud mottling
-const VEIL_WISP_STRENGTH = 0.32; // how much white cloud shows through
+const VEIL_PAPER: [number, number, number] = [196, 190, 182]; // base (neutral grey)
+const VEIL_SHADOW: [number, number, number] = [150, 146, 138]; // low mottling
+const VEIL_WISP: [number, number, number] = [232, 232, 230]; // cloud highlights
+const VEIL_CONTRAST = 0.9; // spread of the cloud mottling
+const VEIL_WISP_STRENGTH = 0.47; // how much white cloud shows through
 const VEIL_MARGIN = 28; // mask-px overscan so drift never exposes an edge
-const DRIFT_AMP = 10; // mask-px drift amplitude (0 = still)
-const DRIFT_SPEED = 1; // drift speed multiplier
+const DRIFT_AMP = 13; // mask-px drift amplitude (0 = still)
+const DRIFT_SPEED = 1.4; // drift speed multiplier
 const DRIFT_FPS = 12; // throttle the drift so it barely costs battery
 
 // ---- Reveal shape ----------------------------------------------------------
@@ -45,7 +45,7 @@ const CORE_BLUR_MIN = 3;
 const HALO_BLUR_BASE = 4;
 const HALO_BLUR_SPREAD = 22;
 const HALO_BLUR_EDGE = 0.6;
-const HALO_ALPHA = 0.55;
+const HALO_ALPHA = 0.35;
 
 // Disc radius per cell, as a share of the cell edge. Overlapping discs union into
 // smooth, organic shapes with no hexagon steps, and a thin route stays connected.

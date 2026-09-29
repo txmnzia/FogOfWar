@@ -20,8 +20,8 @@ export interface FogSettings {
 }
 
 export const DEFAULT_SETTINGS: FogSettings = {
-  darkness: 0.88,
-  fade: 0.45,
+  darkness: 0.9,
+  fade: 0.56,
 };
 
 export const SETTINGS_BOUNDS = {
