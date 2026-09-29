@@ -99,7 +99,7 @@ const GEN_KEY = "fow.generosity";
 function readGenerosity(): number {
   try {
     const v = parseFloat(localStorage.getItem(GEN_KEY) ?? "");
-    return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : DEFAULT_SETTINGS.generosity;
+    return Number.isFinite(v) ? Math.max(-1, Math.min(1, v)) : DEFAULT_SETTINGS.generosity;
   } catch {
     return DEFAULT_SETTINGS.generosity;
   }
