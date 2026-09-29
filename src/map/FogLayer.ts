@@ -26,25 +26,27 @@ const MIN_DRAW_CSS = 6;
 // is invisible on such soft imagery, quarters the fill+blur cost, and adds a
 // little extra watercolor smoothing for free.
 const MASK_DOWNSCALE = 3;
-// Core softening, as a share of the cell edge (device px). Discs are already
-// round and connected, so this only needs to smooth the small scallops where
-// neighbouring discs meet.
-const CORE_BLUR_EDGE = 0.85;
-const CORE_BLUR_MIN = 2;
-// Halo reach (device px): a base plus the "fade" setting plus a share of the
-// cell, so the glow scales with both the slider and the zoom.
-const HALO_BLUR_BASE = 6;
-const HALO_BLUR_SPREAD = 48;
-const HALO_BLUR_EDGE = 0.9;
+// Colour of the veil over unexplored ground — a dark neutral grey.
+const VEIL_RGB = "32,34,40";
+// Edge softness, as a share of the cell edge (device px). A single blur of the
+// disc mask dissolves the boundary into the grey — soft, but contained, so the
+// bright area stays clearly readable (matching the reference's moderate feather).
+const CORE_BLUR_EDGE = 0.7;
+const CORE_BLUR_MIN = 3;
+// Halo reach (device px): a modest outer glow just past the soft edge. Driven by
+// the "fade" setting, so the slider can push it wider/dreamier on demand.
+const HALO_BLUR_BASE = 4;
+const HALO_BLUR_SPREAD = 22;
+const HALO_BLUR_EDGE = 0.6;
 // Peak translucency of the halo (fraction of the veil it lifts just outside the
-// core). Below 1 so the glow always stays a glow.
-const HALO_ALPHA = 0.85;
+// edge). Kept modest so it reads as a soft glow, not a second wide fade.
+const HALO_ALPHA = 0.55;
 
 // Disc radius per cell, as a share of the cell edge. At 1.0 a disc reaches the
 // cell's corners, so neighbours overlap into a smooth, gapless region and a thin
 // route becomes a continuous sausage — round shapes have no flat edges, so there
 // are no hexagon steps to show.
-const DISC_R = 1.15;
+const DISC_R = 1.25;
 
 interface Level {
   res: number;
@@ -293,13 +295,13 @@ export class FogLayer {
     fctx.globalAlpha = 1;
     fctx.filter = "none";
     fctx.clearRect(0, 0, fw, fh);
-    fctx.fillStyle = `rgba(20,14,7,${this.settings.darkness})`;
+    fctx.fillStyle = `rgba(${VEIL_RGB},${this.settings.darkness})`;
     fctx.fillRect(0, 0, fw, fh);
 
     fctx.globalCompositeOperation = "destination-out";
-    // Core: fully lift the veil over the footprint. The disc mask is already
-    // round and connected, so a soft blur here smooths the scallops between
-    // overlapping discs into one continuous, hand-painted body.
+    // Core: lift the veil over the footprint through a single wide blur, so the
+    // edge dissolves gradually into the grey with almost no hard boundary. Discs
+    // overlap enough (DISC_R) that this blur can't bead a thin route.
     fctx.globalAlpha = 1;
     fctx.filter = coreBlur > 0.3 ? `blur(${coreBlur}px)` : "none";
     fctx.drawImage(this.mask, 0, 0);
