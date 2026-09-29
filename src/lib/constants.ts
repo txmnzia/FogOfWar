@@ -23,9 +23,9 @@ export interface FogSettings {
 }
 
 export const DEFAULT_SETTINGS: FogSettings = {
-  darkness: 0.9,
-  fade: 0.56,
-  generosity: 0.65,
+  darkness: 0.95,
+  fade: 0.56, // now derived per-zoom in FogLayer; kept for the type/back-compat
+  generosity: 0.65, // now derived per-zoom in FogLayer
 };
 
 export const SETTINGS_BOUNDS = {
