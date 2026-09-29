@@ -1,4 +1,5 @@
 import type { Map as MlMap, MapGeoJSONFeature } from "maplibre-gl";
+import { crestSvg } from "../lib/crest";
 
 // A styled label overlay. MapLibre's native labels need pre-baked glyph fonts, so
 // they can't use a web font like Cinzel. Instead we read the place + water names
@@ -69,7 +70,11 @@ interface Item {
   lng: number;
   lat: number;
   kind: Kind;
+  crestEl: HTMLElement | null;
 }
+
+// Realms (countries, regions, cities) get a heraldic crest above the name.
+const REALM_KINDS = new Set<Kind>(["country", "region", "city"]);
 
 export class LabelLayer {
   private map: MlMap;
@@ -167,11 +172,33 @@ export class LabelLayer {
     this.items = list.map((it) => {
       const el = document.createElement("div");
       el.className = "maplabel " + it.kind;
-      el.textContent = it.name;
+      let crestEl: HTMLElement | null = null;
+      if (REALM_KINDS.has(it.kind)) {
+        crestEl = document.createElement("span");
+        crestEl.className = "crest";
+        crestEl.innerHTML = this.crestFor(it.name);
+        el.appendChild(crestEl);
+        const txt = document.createElement("span");
+        txt.className = "lbl-text";
+        txt.textContent = it.name;
+        el.appendChild(txt);
+      } else {
+        el.textContent = it.name;
+      }
       this.root.appendChild(el);
-      return { el, lng: it.lng, lat: it.lat, kind: it.kind };
+      return { el, lng: it.lng, lat: it.lat, kind: it.kind, crestEl };
     });
     this.reposition();
+  }
+
+  private crestCache = new Map<string, string>();
+  private crestFor(name: string): string {
+    let s = this.crestCache.get(name);
+    if (!s) {
+      s = crestSvg(name);
+      this.crestCache.set(name, s);
+    }
+    return s;
   }
 
   private reposition() {
@@ -186,7 +213,13 @@ export class LabelLayer {
         continue;
       }
       it.el.style.display = "";
-      it.el.style.fontSize = sizeFor(it.kind, z).toFixed(1) + "px";
+      const fs = sizeFor(it.kind, z);
+      it.el.style.fontSize = fs.toFixed(1) + "px";
+      if (it.crestEl) {
+        const h = fs * 2.4;
+        it.crestEl.style.width = ((h * 100) / 120).toFixed(1) + "px";
+        it.crestEl.style.height = h.toFixed(1) + "px";
+      }
       it.el.style.transform = `translate(${pt.x}px, ${pt.y}px) translate(-50%, -50%)`;
     }
   }
