@@ -90,12 +90,24 @@ export async function collectPhotoPoints(
 /**
  * Expand a set of photo coordinates into unique H3 cell indexes, each grown to
  * a small candlelight so a lone photo reads as a visited spot, not a pinprick.
+ * Yields to the event loop every few thousand points so the UI keeps painting
+ * (and progress keeps updating) on a large archive instead of locking up.
  */
-export function photosToCellIndexes(points: Array<[number, number]>): Set<string> {
+export async function photosToCellIndexes(
+  points: Array<[number, number]>,
+  onProgress?: (done: number, total: number) => void,
+): Promise<Set<string>> {
   const out = new Set<string>();
-  for (const [lat, lng] of points) {
+  const total = points.length;
+  for (let i = 0; i < total; i++) {
+    const [lat, lng] = points[i];
     const cell = latLngToCell(lat, lng, H3_RES);
     for (const c of gridDisk(cell, RING)) out.add(c);
+    if ((i + 1) % 3000 === 0) {
+      onProgress?.(i + 1, total);
+      await new Promise((r) => setTimeout(r)); // let the browser repaint
+    }
   }
+  onProgress?.(total, total);
   return out;
 }
