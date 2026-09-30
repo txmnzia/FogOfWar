@@ -16,6 +16,7 @@ interface Props {
   onDeletePin: (id: string) => void;
   onOpenImport: () => void;
   onOpenStrava: () => void;
+  onOpenPhotos: () => void;
   onExport: () => void;
   onSignOut: () => void;
   onClose: () => void;
@@ -70,8 +71,9 @@ export function MenuPanel(p: Props) {
         <h3>Your travels</h3>
         <button className="btn block" onClick={p.onOpenImport}>Import Google Timeline</button>
         <button className="btn block" style={{ marginTop: 8 }} onClick={p.onOpenStrava}>Import Strava</button>
+        <button className="btn block" style={{ marginTop: 8 }} onClick={p.onOpenPhotos}>Import photo locations</button>
         <button className="btn ghost block" style={{ marginTop: 8 }} onClick={p.onExport}>Export explored cells</button>
-        <p className="hint" style={{ marginTop: 8 }}>Reveal everywhere your location history and activities have been.</p>
+        <p className="hint" style={{ marginTop: 8 }}>Reveal everywhere your location history, activities and photos have been.</p>
       </div>
 
       <div className="section">
