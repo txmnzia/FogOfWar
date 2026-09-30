@@ -36,20 +36,12 @@ const DRIFT_SPEED = 1.4; // drift speed multiplier
 const DRIFT_FPS = 12; // throttle the drift so it barely costs battery
 
 // ---- Reveal shape ----------------------------------------------------------
-// Edge softness, as a share of the cell edge (device px): a single wide blur of
-// the disc mask dissolves the boundary into the clouds — soft, but contained.
-const CORE_BLUR_EDGE = 0.7;
+// The shape parameters (edge softness, disc overlap, halo, etc.) are driven by
+// fogParamsForZoom(); only the fixed sub-terms live here as constants.
 const CORE_BLUR_MIN = 3;
-// Halo reach (device px): a modest translucent glow just past the soft edge,
-// driven by the "fade" setting so the slider can push it wider on demand.
 const HALO_BLUR_BASE = 4;
 const HALO_BLUR_SPREAD = 22;
 const HALO_BLUR_EDGE = 0.6;
-const HALO_ALPHA = 0.35;
-
-// Disc radius per cell, as a share of the cell edge. Overlapping discs union into
-// smooth, organic shapes with no hexagon steps, and a thin route stays connected.
-const DISC_R = 1.25;
 
 // Open water is revealed for orientation, but a fog band is kept hugging every
 // coast so the coastline itself is still earned by exploring. The band width is
@@ -128,13 +120,15 @@ export class FogLayer {
   private lastCells: Cell[] | null = null;
   private pins: Pin[] = [];
   private settings: FogSettings;
-  // Advanced, live-tunable knobs (Fog Lab). Default to the baked constants.
+  // Fog Lab nudges: additive offsets on the zoom-driven curves (0 = pure formula).
   private tuning = {
-    discR: DISC_R,
-    coreEdge: CORE_BLUR_EDGE,
-    markSurvive: 1.3,
-    closeScale: 1,
-    haloAlpha: HALO_ALPHA,
+    generosity: 0,
+    fade: 0,
+    discR: 0,
+    coreEdge: 0,
+    markSurvive: 0,
+    closeScale: 0,
+    haloAlpha: 0,
   };
   private raf = 0;
   private driftRaf = 0;
@@ -342,8 +336,20 @@ export class FogLayer {
     const minPx = MIN_DRAW_CSS * scale;
 
     // All shape parameters follow a zoom-driven curve, so the fog stays right at
-    // every scale from one formula instead of one compromise value.
-    const P = fogParamsForZoom(this.map.getZoom());
+    // every scale from one formula instead of one compromise value. Fog Lab nudges
+    // (this.tuning) are additive offsets on top, 0 = pure formula.
+    const base = fogParamsForZoom(this.map.getZoom());
+    const T = this.tuning;
+    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+    const P = {
+      generosity: clamp(base.generosity + T.generosity, -1.5, 1.5),
+      fade: clamp(base.fade + T.fade, 0, 1.3),
+      discR: Math.max(0.5, base.discR + T.discR),
+      coreEdge: Math.max(0.15, base.coreEdge + T.coreEdge),
+      markSurvive: Math.max(0.4, base.markSurvive + T.markSurvive),
+      closeScale: Math.max(0, base.closeScale + T.closeScale),
+      haloAlpha: clamp(base.haloAlpha + T.haloAlpha, 0, 0.9),
+    };
 
     // Affine mercator→mask transform (view-only), shared by cells and water.
     const c = this.map.getCenter();
