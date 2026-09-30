@@ -25,20 +25,37 @@ export async function fetchAllCellIndexes(): Promise<string[]> {
   return out;
 }
 
-/** Insert new explored cells, ignoring any that already exist. Returns count of rows sent. */
+/**
+ * Insert new explored cells, ignoring any that already exist. Returns count of
+ * rows sent. Upserts are idempotent, so a failed run can simply be retried and
+ * will skip whatever already landed. Each chunk is retried with backoff before
+ * giving up, so a single network blip mid-import doesn't abort the whole thing.
+ */
 export async function addCells(
   userId: string,
   indexes: Iterable<string>,
   source: string,
+  onProgress?: (done: number, total: number) => void,
 ): Promise<number> {
   const db = client();
   const rows = Array.from(indexes, (h3) => ({ user_id: userId, h3, source }));
-  const chunk = 500;
+  const chunk = 1000;
   for (let i = 0; i < rows.length; i += chunk) {
-    const { error } = await db
-      .from("explored_cells")
-      .upsert(rows.slice(i, i + chunk), { onConflict: "user_id,h3", ignoreDuplicates: true });
-    if (error) throw error;
+    const slice = rows.slice(i, i + chunk);
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const { error } = await db
+        .from("explored_cells")
+        .upsert(slice, { onConflict: "user_id,h3", ignoreDuplicates: true });
+      if (!error) {
+        lastErr = undefined;
+        break;
+      }
+      lastErr = error;
+      await new Promise((r) => setTimeout(r, 500 * 2 ** attempt)); // 0.5s, 1s, 2s
+    }
+    if (lastErr) throw lastErr;
+    onProgress?.(Math.min(i + chunk, rows.length), rows.length);
   }
   return rows.length;
 }
