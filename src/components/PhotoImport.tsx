@@ -47,8 +47,9 @@ export function PhotoImport({ userId, onClose, onImported }: Props) {
         throw new Error("Found photo metadata, but none of it had GPS coordinates.");
       }
 
-      setDetail(`Mapping ${points.length.toLocaleString()} located photos…`);
-      const cells = photosToCellIndexes(points);
+      const cells = await photosToCellIndexes(points, (done, total) => {
+        setDetail(`Mapping ${done.toLocaleString()} / ${total.toLocaleString()} located photos…`);
+      });
       const idxs = Array.from(cells);
 
       // Reveal on the map right away — independent of the network save below, so
