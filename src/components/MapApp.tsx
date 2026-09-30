@@ -10,6 +10,7 @@ import { ImportScreen } from "./ImportScreen";
 import { StravaImport } from "./StravaImport";
 import { supabase } from "../lib/supabase";
 import { DEFAULT_SETTINGS, H3_RES, type FogSettings } from "../lib/constants";
+import { loadTuning, saveTuning, type FogTuning } from "../lib/fogTuning";
 import { cellFromIndex } from "../lib/h3";
 import type { Cell, Pin } from "../lib/types";
 import {
@@ -27,6 +28,7 @@ const CELL_AREA_KM2 = getHexagonAreaAvg(H3_RES, "km2");
 
 export function MapApp({ userId, email }: { userId: string; email: string }) {
   const [settings, setSettings] = useState<FogSettings>(DEFAULT_SETTINGS);
+  const [tuning, setTuning] = useState<FogTuning>(loadTuning);
   const [cells, setCells] = useState<Cell[]>([]);
   const [pins, setPins] = useState<Pin[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -42,6 +44,8 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
   const saveTimer = useRef<number>();
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
+  const tuningRef = useRef(tuning);
+  tuningRef.current = tuning;
 
   const usingSample = loaded && cells.length === 0 && pins.length === 0;
   const displayCells = useMemo(() => (usingSample ? sampleCells() : cells), [usingSample, cells]);
@@ -66,6 +70,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
   const onReady = useCallback((map: MlMap) => {
     mapRef.current = map;
     fogRef.current = new FogLayer(map, settingsRef.current);
+    fogRef.current.setTuning(tuningRef.current);
     labelsRef.current = new LabelLayer(map, fogRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -92,6 +97,10 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
     fogRef.current?.setSettings(settings);
   }, [settings]);
 
+  useEffect(() => {
+    fogRef.current?.setTuning(tuning);
+  }, [tuning]);
+
   useEffect(
     () => () => {
       labelsRef.current?.destroy();
@@ -107,6 +116,11 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
     saveTimer.current = window.setTimeout(() => {
       saveSettings(userId, s).catch(() => {});
     }, 400);
+  }
+
+  function changeTuning(t: FogTuning) {
+    setTuning(t);
+    saveTuning(t);
   }
 
   async function pickPlace(place: { name: string; lng: number; lat: number }) {
@@ -169,8 +183,10 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
         <MenuPanel
           email={email}
           settings={settings}
+          tuning={tuning}
           pins={pins}
           onSettings={changeSettings}
+          onTuning={changeTuning}
           onPickPlace={pickPlace}
           onPinRadius={changePinRadius}
           onDeletePin={deletePin}
