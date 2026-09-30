@@ -54,6 +54,40 @@ export function isSidecar(name: string): boolean {
 }
 
 /**
+ * Read many sidecar files with a bounded number of reads in flight at once, so
+ * a huge archive (tens of thousands of files) isn't read one-at-a-time. Reports
+ * progress as each file resolves and returns every coordinate found.
+ */
+export async function collectPhotoPoints(
+  files: File[],
+  onProgress?: (read: number, total: number, found: number) => void,
+  concurrency = 12,
+): Promise<Array<[number, number]>> {
+  const points: Array<[number, number]> = [];
+  let read = 0;
+  let next = 0;
+
+  async function worker() {
+    while (next < files.length) {
+      const file = files[next++];
+      let text = "";
+      try {
+        text = await file.text();
+      } catch {
+        text = ""; // Unreadable file — skip it rather than abort the whole run.
+      }
+      const pt = text ? coordFromSidecar(text) : null;
+      if (pt) points.push(pt);
+      read++;
+      if (read % 250 === 0 || read === files.length) onProgress?.(read, files.length, points.length);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, files.length) }, worker));
+  return points;
+}
+
+/**
  * Expand a set of photo coordinates into unique H3 cell indexes, each grown to
  * a small candlelight so a lone photo reads as a visited spot, not a pinprick.
  */
