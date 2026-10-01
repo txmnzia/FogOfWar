@@ -2,6 +2,7 @@ import type { Map as MlMap, MapGeoJSONFeature } from "maplibre-gl";
 import type { FogLayer } from "./FogLayer";
 import { crestSvg } from "../lib/crest";
 import type { Cell, Pin } from "../lib/types";
+import { discoveredCountries, loadCountries, type Country } from "../lib/countries";
 
 // A styled label overlay. MapLibre's native labels need pre-baked glyph fonts, so
 // they can't use a web font like Cinzel. Instead we read the place + water names
@@ -57,7 +58,7 @@ function sizeFor(kind: Kind, z: number): number {
 function visibleAt(kind: Kind, z: number, discovered: boolean): boolean {
   switch (kind) {
     case "country":
-      return z >= 2 && (z <= 6.5 || discovered);
+      return discovered || (z >= 2 && z <= 6.5);
     case "region":
       return z >= 3.5 && (z <= 9 || discovered);
     case "city":
@@ -158,6 +159,11 @@ export class LabelLayer {
   private moveRaf = 0;
   private rebuildTimer = 0;
   private discovery = new Discovery();
+  // Country borders, once loaded. From then on countries come from these (any
+  // explored cell inside → discovered) instead of the tiles' label points.
+  private countries: Country[] | null = null;
+  private realms: Country[] = [];
+  private explored: { cells: Cell[]; pins: Pin[] } = { cells: [], pins: [] };
 
   private onMove = () => {
     if (this.moveRaf) return;
@@ -188,6 +194,20 @@ export class LabelLayer {
   /** Explored data used to decide which realms are discovered. */
   setExplored(cells: Cell[], pins: Pin[]) {
     this.discovery.set(cells, pins);
+    this.explored = { cells, pins };
+    if (this.countries) {
+      this.realms = discoveredCountries(this.countries, cells, pins);
+    } else {
+      loadCountries()
+        .then((all) => {
+          this.countries = all;
+          this.realms = discoveredCountries(all, this.explored.cells, this.explored.pins);
+          this.rebuild();
+        })
+        .catch(() => {
+          // Keep the tile-based fallback if the borders fail to load.
+        });
+    }
   }
 
   /** Re-evaluate labels (e.g. after explored data changes). */
@@ -249,13 +269,20 @@ export class LabelLayer {
     };
 
     try {
-      consider(this.map.querySourceFeatures(src, { sourceLayer: "place" }), (cls) => kindFor(cls));
+      const own = this.countries !== null;
+      consider(this.map.querySourceFeatures(src, { sourceLayer: "place" }), (cls) =>
+        own && cls === "country" ? null : kindFor(cls),
+      );
       consider(this.map.querySourceFeatures(src, { sourceLayer: "water_name" }), () => "water");
     } catch {
       return;
     }
 
-    const list = [...chosen.values()].sort((a, b) => a.rank - b.rank).slice(0, MAX_LABELS);
+    // Discovered countries are never dropped by the label cap.
+    const realms: Pick[] = this.countries
+      ? this.realms.map((c) => ({ kind: "country", name: c.name, lng: c.lng, lat: c.lat, rank: 0, discovered: true }))
+      : [];
+    const list = [...realms, ...[...chosen.values()].sort((a, b) => a.rank - b.rank).slice(0, MAX_LABELS)];
 
     this.root.textContent = "";
     this.items = [];
