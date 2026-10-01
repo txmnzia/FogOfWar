@@ -15,6 +15,8 @@ export interface Country {
   lat: number;
   polygons: Polygon[];
   bbox: [number, number, number, number]; // minLng, minLat, maxLng, maxLat
+  /** Rough land area (deg², latitude-corrected), used to rank labels. */
+  area: number;
 }
 
 // world-atlas abbreviates some names; spell them out for the map.
@@ -77,7 +79,12 @@ async function build(): Promise<Country[]> {
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     let main = polygons[0];
+    // Rings crossing the antimeridian (Fiji, Russia) jump from +180 to -180;
+    // shift their western half by +360 so the ring is continuous. Points are
+    // then tested at both lng and lng+360 (see `variants`).
+    for (const p of polygons) for (const r of p) unwrap(r);
     let mainArea = -1;
+    let area = 0;
     for (const p of polygons) {
       for (const [x, y] of p[0]) {
         if (x < minX) minX = x;
@@ -86,16 +93,31 @@ async function build(): Promise<Country[]> {
         if (y > maxY) maxY = y;
       }
       const a = Math.abs(ringArea(p[0]));
+      const midLat = (p[0][0][1] * Math.PI) / 180;
+      area += a * Math.cos(midLat);
       if (a > mainArea) {
         mainArea = a;
         main = p;
       }
     }
     const name = NAME_FIX[raw] ?? raw;
-    const [lng, lat] = LABEL_FIX[name] ?? polylabel(main, 0.05);
-    out.push({ name, lng, lat, polygons, bbox: [minX, minY, maxX, maxY] });
+    const [rawLng, lat] = LABEL_FIX[name] ?? polylabel(main, 0.05);
+    const lng = rawLng > 180 ? rawLng - 360 : rawLng;
+    out.push({ name, lng, lat, polygons, bbox: [minX, minY, maxX, maxY], area });
   }
   return out;
+}
+
+function unwrap(r: Ring) {
+  let crosses = false;
+  for (let i = 1; i < r.length && !crosses; i++) crosses = Math.abs(r[i][0] - r[i - 1][0]) > 180;
+  if (!crosses) return;
+  for (const pt of r) if (pt[0] < 0) pt[0] += 360;
+}
+
+/** A point west of 0° may also match an unwrapped ring at lng + 360. */
+function variants(lng: number): number[] {
+  return lng < 0 ? [lng, lng + 360] : [lng];
 }
 
 function ringArea(r: Ring): number {
@@ -144,23 +166,27 @@ export function discoveredCountries(countries: Country[], cells: Cell[], pins: P
   const found = new Set<Country>();
   for (const [lng, lat] of pts) {
     let hit = false;
+    // Every containing country counts: the coarse borders overlap slightly.
     for (const c of countries) {
-      if (contains(c, lng, lat)) {
+      if (variants(lng).some((x) => contains(c, x, lat))) {
         found.add(c);
         hit = true;
-        break;
       }
     }
     if (!hit) {
-      const near = nearest(countries, lng, lat);
-      if (near) found.add(near);
+      let best: { c: Country; d: number } | null = null;
+      for (const x of variants(lng)) {
+        const n = nearest(countries, x, lat);
+        if (n && (!best || n.d < best.d)) best = n;
+      }
+      if (best) found.add(best.c);
     }
   }
   return countries.filter((c) => found.has(c));
 }
 
 /** Nearest country whose outline is within SNAP_KM of the point, if any. */
-function nearest(countries: Country[], lng: number, lat: number): Country | null {
+function nearest(countries: Country[], lng: number, lat: number): { c: Country; d: number } | null {
   const kx = 111.32 * Math.cos((lat * Math.PI) / 180);
   const ky = 110.57;
   const padLat = SNAP_KM / ky;
@@ -187,5 +213,5 @@ function nearest(countries: Country[], lng: number, lat: number): Country | null
       }
     }
   }
-  return best;
+  return best ? { c: best, d: bestD } : null;
 }
