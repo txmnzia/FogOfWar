@@ -213,6 +213,9 @@ input[type="range"]::-moz-range-thumb {
   filter: drop-shadow(0 3px 3px rgba(60, 44, 20, 0.35));
 }
 .mapicon img { display: block; width: auto; }
+.mapicon.fade-in { animation: poi-fade 0.45s ease both; }
+@keyframes poi-fade { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .mapicon.fade-in { animation: none; } }
 
 .zoom-readout {
   display: flex; justify-content: space-between; align-items: baseline;
