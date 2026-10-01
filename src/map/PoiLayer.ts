@@ -32,10 +32,11 @@ const SRC_URL: Record<IconName, string> = {
 };
 
 // Fixed on-screen height (px) per type — relative sizes (a range dwarfs a
-// cottage); multiplied by a small per-icon variation.
+// cottage; houses stay under castles/churches; park oaks are cottage-sized
+// while forest conifers are bigger); multiplied by a small per-icon variation.
 const BASE_PX: Record<IconName, number> = {
-  castle: 48, church: 48, monument: 42, obelisk: 40, ruins: 38, lighthouse: 46,
-  village: 44, hamlet: 36, house: 30, house2: 30, oak: 40, pines: 44, fir: 38, mountains: 56, peak: 46,
+  castle: 52, church: 52, monument: 42, obelisk: 40, ruins: 40, lighthouse: 48,
+  village: 42, hamlet: 34, house: 30, house2: 30, oak: 30, pines: 48, fir: 42, mountains: 58, peak: 48,
 };
 
 const FLIPPABLE = new Set<IconName>(["house", "house2", "village", "hamlet", "oak", "pines", "fir", "mountains", "peak"]);
@@ -99,6 +100,10 @@ export class PoiLayer {
   private fog: FogLayer | null;
   private root: HTMLDivElement;
   private items = new Map<string, Item>();
+  // Each geo cell's chosen icons are LOCKED the first time the cell is seen at
+  // zoom >= Z_ON, so zooming in never adds, removes or swaps icons. Cleared only
+  // when the explored data changes (refresh).
+  private decided = new Map<string, Pick[]>();
   private srcName: string | null = null;
   private moveRaf = 0;
   private rebuildTimer = 0;
@@ -126,7 +131,7 @@ export class PoiLayer {
     this.rebuild();
   }
 
-  refresh() { this.rebuild(); }
+  refresh() { this.decided.clear(); this.rebuild(); }
 
   destroy() {
     cancelAnimationFrame(this.moveRaf);
@@ -161,15 +166,14 @@ export class PoiLayer {
     return !this.fog || this.fog.isRevealed(lng, lat);
   }
 
-  // one landmark per fixed geo cell (the most important), so the set is stable
-  private gatherLandmarks(src: string): Pick[] {
-    const best = new Map<string, Pick>();
+  // ---- candidate maps (keyed by geo cell) from the current tiles ----
+  private landmarkCandidates(src: string): Map<string, { icon: IconName; lng: number; lat: number; rank: number; scale: number }> {
+    const best = new Map<string, { icon: IconName; lng: number; lat: number; rank: number; scale: number }>();
     const consider = (icon: IconName, lng: number, lat: number, rank: number, scale: number) => {
-      if (!this.revealed(lng, lat)) return;
-      const k = `L${Math.floor(lng / LANDMARK_CELL)}_${Math.floor(lat / LANDMARK_CELL)}`;
+      const k = `${Math.floor(lng / LANDMARK_CELL)}_${Math.floor(lat / LANDMARK_CELL)}`;
       const prev = best.get(k);
       if (prev && prev.rank <= rank) return;
-      best.set(k, { key: k, icon, lng, lat, rank, scale: scale * vary(lng, lat), flip: rand(lat * 13, lng * 13) > 0.5 });
+      best.set(k, { icon, lng, lat, rank, scale });
     };
     for (const f of this.query(src, "poi")) {
       if (f.geometry?.type !== "Point") continue;
@@ -186,14 +190,10 @@ export class PoiLayer {
       if (!s) continue;
       consider(s.icon, lng, lat, Number((f.properties as Record<string, unknown>)?.rank ?? 40) + 6, s.scale);
     }
-    return [...best.values()];
+    return best;
   }
 
-  // nature derived on fixed geo grids (stable): a range or peak per cell, and a
-  // grove of 3–4 trees per wood cell.
-  private gatherNature(src: string): Pick[] {
-    const out: Pick[] = [];
-
+  private peakCandidates(src: string): Map<string, { n: number; top: { lng: number; lat: number; ele: number } }> {
     const groups = new Map<string, { n: number; top: { lng: number; lat: number; ele: number } }>();
     for (const f of this.query(src, "mountain_peak")) {
       if (f.geometry?.type !== "Point") continue;
@@ -203,23 +203,15 @@ export class PoiLayer {
       const ele = Number(pr.ele ?? 0);
       if (!Number.isFinite(ele) || ele < MIN_ELE) continue;
       const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates;
-      if (!this.revealed(lng, lat)) continue;
       const k = `${Math.floor(lng / PEAK_CELL)}_${Math.floor(lat / PEAK_CELL)}`;
       const g = groups.get(k);
       if (g) { g.n++; if (ele > g.top.ele) g.top = { lng, lat, ele }; }
       else groups.set(k, { n: 1, top: { lng, lat, ele } });
     }
-    for (const [k, g] of groups) {
-      if (g.n >= 3) {
-        const [gx, gy] = k.split("_").map(Number);
-        const lng = (gx + 0.5) * PEAK_CELL, lat = (gy + 0.5) * PEAK_CELL;
-        out.push({ key: `M${k}`, icon: "mountains", lng, lat, rank: 5, scale: vary(lng, lat), flip: rand(gx * 17, gy * 17) > 0.5 });
-      } else {
-        const { lng, lat } = g.top;
-        out.push({ key: `P${k}`, icon: "peak", lng, lat, rank: 8, scale: vary(lng, lat), flip: rand(lat * 31, lng * 31) > 0.5 });
-      }
-    }
+    return groups;
+  }
 
+  private forestCandidates(src: string): Map<string, { area: number; wood: boolean }> {
     const cells = new Map<string, { area: number; wood: boolean }>();
     const take = (feats: MapGeoJSONFeature[], wood: boolean) => {
       for (const f of feats) {
@@ -236,20 +228,62 @@ export class PoiLayer {
     };
     take(this.query(src, "landcover", ["==", "class", "wood"]), true);
     take(this.query(src, "park"), false);
-    for (const [k, c] of cells) {
-      const [gx, gy] = k.split("_").map(Number);
-      const cx = (gx + 0.5) * FOREST_CELL, cy = (gy + 0.5) * FOREST_CELL;
-      if (!this.revealed(cx, cy)) continue;
-      const n = rand(gx, gy) > 0.5 ? 4 : 3;
-      for (let i = 0; i < n; i++) {
-        const lng = cx + (rand(gx * 7 + i, gy * 3) - 0.5) * FOREST_CELL * 0.6;
-        const lat = cy + (rand(gy * 7 + i * 5, gx * 3) - 0.5) * FOREST_CELL * 0.6;
-        const r3 = rand(i + gx, gy - i);
-        const icon: IconName = c.wood
-          ? (r3 < 0.45 ? "pines" : r3 < 0.8 ? "fir" : "oak")
-          : (r3 < 0.6 ? "oak" : r3 < 0.85 ? "fir" : "pines");
-        out.push({ key: `F${k}:${i}`, icon, lng, lat, rank: 30, scale: vary(lng + i, lat), flip: rand(lat, lng) > 0.5 });
+    return cells;
+  }
+
+  // Walk the viewport's cells. A cell is decided ONCE (the first time it's seen
+  // revealed), then reused — so zooming in never changes the set.
+  private decideLayer(prefix: string, cell: number, make: (gx: number, gy: number) => Pick[]): Pick[] {
+    const b = this.map.getBounds();
+    const gx0 = Math.floor(b.getWest() / cell) - 1, gx1 = Math.floor(b.getEast() / cell) + 1;
+    const gy0 = Math.floor(b.getSouth() / cell) - 1, gy1 = Math.floor(b.getNorth() / cell) + 1;
+    const out: Pick[] = [];
+    for (let gx = gx0; gx <= gx1; gx++) {
+      for (let gy = gy0; gy <= gy1; gy++) {
+        const key = `${prefix}${gx}_${gy}`;
+        let d = this.decided.get(key);
+        if (d === undefined) {
+          if (!this.revealed((gx + 0.5) * cell, (gy + 0.5) * cell)) continue; // not explored yet — decide later
+          d = make(gx, gy);
+          this.decided.set(key, d);
+        }
+        for (const p of d) out.push(p);
       }
+    }
+    return out;
+  }
+
+  private makeLandmark(best: ReturnType<PoiLayer["landmarkCandidates"]>, gx: number, gy: number): Pick[] {
+    const c = best.get(`${gx}_${gy}`);
+    if (!c) return [];
+    const key = `L${gx}_${gy}`;
+    return [{ key, icon: c.icon, lng: c.lng, lat: c.lat, rank: c.rank, scale: c.scale * vary(c.lng, c.lat), flip: rand(c.lat * 13, c.lng * 13) > 0.5 }];
+  }
+
+  private makePeak(groups: ReturnType<PoiLayer["peakCandidates"]>, gx: number, gy: number): Pick[] {
+    const g = groups.get(`${gx}_${gy}`);
+    if (!g) return [];
+    if (g.n >= 3) {
+      const lng = (gx + 0.5) * PEAK_CELL, lat = (gy + 0.5) * PEAK_CELL;
+      return [{ key: `K${gx}_${gy}`, icon: "mountains", lng, lat, rank: 5, scale: vary(lng, lat), flip: rand(gx * 17, gy * 17) > 0.5 }];
+    }
+    const { lng, lat } = g.top;
+    return [{ key: `K${gx}_${gy}`, icon: "peak", lng, lat, rank: 8, scale: vary(lng, lat), flip: rand(lat * 31, lng * 31) > 0.5 }];
+  }
+
+  private makeForest(best: ReturnType<PoiLayer["forestCandidates"]>, gx: number, gy: number): Pick[] {
+    const c = best.get(`${gx}_${gy}`);
+    if (!c) return [];
+    const cx = (gx + 0.5) * FOREST_CELL, cy = (gy + 0.5) * FOREST_CELL;
+    const n = rand(gx, gy) > 0.5 ? 4 : 3;
+    const out: Pick[] = [];
+    for (let i = 0; i < n; i++) {
+      const lng = cx + (rand(gx * 7 + i, gy * 3) - 0.5) * FOREST_CELL * 0.6;
+      const lat = cy + (rand(gy * 7 + i * 5, gx * 3) - 0.5) * FOREST_CELL * 0.6;
+      // never mix broadleaf oaks with conifers in one stand: woods are conifer,
+      // parks are oak.
+      const icon: IconName = c.wood ? (rand(i + gx, gy - i) < 0.5 ? "pines" : "fir") : "oak";
+      out.push({ key: `F${gx}_${gy}:${i}`, icon, lng, lat, rank: 30, scale: vary(lng + i, lat), flip: rand(lat, lng) > 0.5 });
     }
     return out;
   }
@@ -261,7 +295,12 @@ export class PoiLayer {
     let picks: Pick[] = [];
     if (this.map.getZoom() >= Z_ON) {
       try {
-        picks = this.gatherLandmarks(src).concat(this.gatherNature(src));
+        const land = this.landmarkCandidates(src);
+        const peaks = this.peakCandidates(src);
+        const forest = this.forestCandidates(src);
+        picks = this.decideLayer("L", LANDMARK_CELL, (gx, gy) => this.makeLandmark(land, gx, gy))
+          .concat(this.decideLayer("K", PEAK_CELL, (gx, gy) => this.makePeak(peaks, gx, gy)))
+          .concat(this.decideLayer("F", FOREST_CELL, (gx, gy) => this.makeForest(forest, gx, gy)));
       } catch {
         picks = [];
       }
@@ -294,7 +333,9 @@ export class PoiLayer {
   private reposition() {
     const c = this.map.getCanvas();
     const W = c.clientWidth, H = c.clientHeight;
+    const off = this.map.getZoom() < Z_ON; // below the threshold nothing shows
     for (const it of this.items.values()) {
+      if (off) { it.el.style.display = "none"; continue; }
       const pt = this.map.project([it.lng, it.lat]);
       if (pt.x < -60 || pt.x > W + 60 || pt.y < -90 || pt.y > H + 40) {
         it.el.style.display = "none";
