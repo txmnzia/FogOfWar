@@ -76,6 +76,29 @@ interface Item {
   lat: number;
   kind: Kind;
   crestEl: HTMLElement | null;
+  /** The name element (the whole label for crest-less kinds). */
+  txtEl: HTMLElement;
+  /** Lower draws its name first when names collide. */
+  prio: number;
+  /** Name size in px at `measuredFs`, read once from the DOM. */
+  textW: number;
+  textH: number;
+  measuredFs: number;
+}
+
+interface Box {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+const overlaps = (a: Box, b: Box) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+
+// Crests shrink to ~70% at world view, where Europe packs a dozen of them into a
+// few hundred pixels, and reach full size by zoom 4.
+function crestScale(z: number): number {
+  return 0.7 + 0.3 * Math.max(0, Math.min(1, (z - 1.5) / 2.5));
 }
 
 // Realms (countries, regions, cities) get a heraldic crest above the name.
@@ -245,6 +268,7 @@ export class LabelLayer {
       lat: number;
       rank: number;
       discovered: boolean;
+      prio?: number;
     }
     const chosen = new Map<string, Pick>();
 
@@ -280,7 +304,15 @@ export class LabelLayer {
 
     // Discovered countries are never dropped by the label cap.
     const realms: Pick[] = this.countries
-      ? this.realms.map((c) => ({ kind: "country", name: c.name, lng: c.lng, lat: c.lat, rank: 0, discovered: true }))
+      ? this.realms.map((c) => ({
+          kind: "country",
+          name: c.name,
+          lng: c.lng,
+          lat: c.lat,
+          rank: 0,
+          discovered: true,
+          prio: -1e6 - c.area, // bigger countries keep their name first
+        }))
       : [];
     const list = [...realms, ...[...chosen.values()].sort((a, b) => a.rank - b.rank).slice(0, MAX_LABELS)];
 
@@ -294,6 +326,7 @@ export class LabelLayer {
       const el = document.createElement("div");
       el.className = "maplabel " + it.kind;
       let crestEl: HTMLElement | null = null;
+      let txtEl: HTMLElement = el;
       if (REALM_KINDS.has(it.kind)) {
         crestEl = document.createElement("span");
         crestEl.className = "crest";
@@ -303,11 +336,23 @@ export class LabelLayer {
         txt.className = "lbl-text";
         txt.textContent = it.name;
         el.appendChild(txt);
+        txtEl = txt;
       } else {
         el.textContent = it.name;
       }
       this.root.appendChild(el);
-      this.items.push({ el, lng: it.lng, lat: it.lat, kind: it.kind, crestEl });
+      this.items.push({
+        el,
+        lng: it.lng,
+        lat: it.lat,
+        kind: it.kind,
+        crestEl,
+        txtEl,
+        prio: it.prio ?? it.rank,
+        textW: 0,
+        textH: 0,
+        measuredFs: 0,
+      });
     }
     this.reposition();
   }
@@ -327,6 +372,10 @@ export class LabelLayer {
     const W = c.clientWidth;
     const H = c.clientHeight;
     const z = this.map.getZoom();
+    const cs = crestScale(z);
+
+    // Pass 1 (writes): place every on-screen label at its size.
+    const shown: Array<{ it: Item; x: number; y: number; fs: number }> = [];
     for (const it of this.items) {
       const pt = this.map.project([it.lng, it.lat]);
       if (pt.x < -80 || pt.x > W + 80 || pt.y < -40 || pt.y > H + 40) {
@@ -337,11 +386,47 @@ export class LabelLayer {
       const fs = sizeFor(it.kind, z);
       it.el.style.fontSize = fs.toFixed(1) + "px";
       if (it.crestEl) {
-        const h = fs * 2.4;
+        const h = fs * 2.4 * cs;
         it.crestEl.style.width = ((h * 100) / 120).toFixed(1) + "px";
         it.crestEl.style.height = h.toFixed(1) + "px";
       }
       it.el.style.transform = `translate(${pt.x}px, ${pt.y}px) translate(-50%, -50%)`;
+      shown.push({ it, x: pt.x, y: pt.y, fs });
+    }
+
+    // Pass 2 (one layout read): measure names not measured yet. Letter spacing
+    // is in em, so a name's size scales linearly with the font size after that.
+    for (const s of shown) {
+      if (s.it.measuredFs) continue;
+      s.it.txtEl.style.visibility = "";
+      s.it.textW = s.it.txtEl.offsetWidth;
+      s.it.textH = s.it.txtEl.offsetHeight;
+      s.it.measuredFs = s.fs;
+    }
+
+    // Pass 3: crests always show and act as obstacles; names are drawn in
+    // priority order (big countries first) only where they hit nothing.
+    const crestBoxes: Box[] = [];
+    const geo = shown.map((s) => {
+      const k = s.fs / (s.it.measuredFs || s.fs);
+      const tw = s.it.textW * k;
+      const th = s.it.textH * k;
+      const ch = s.it.crestEl ? s.fs * 2.4 * cs : 0;
+      const cw = (ch * 100) / 120;
+      const total = ch + (ch ? 1 : 0) + th;
+      const top = s.y - total / 2;
+      const crest: Box | null = ch ? { x0: s.x - cw / 2, y0: top, x1: s.x + cw / 2, y1: top + ch } : null;
+      if (crest) crestBoxes.push(crest);
+      const name: Box = { x0: s.x - tw / 2, y0: top + total - th, x1: s.x + tw / 2, y1: top + total };
+      return { it: s.it, crest, name };
+    });
+    geo.sort((a, b) => a.it.prio - b.it.prio);
+    const names: Box[] = [];
+    for (const g of geo) {
+      const hit =
+        names.some((n) => overlaps(n, g.name)) || crestBoxes.some((b) => b !== g.crest && overlaps(b, g.name));
+      g.it.txtEl.style.visibility = hit ? "hidden" : "";
+      if (!hit) names.push(g.name);
     }
   }
 }
