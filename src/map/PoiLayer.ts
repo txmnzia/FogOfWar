@@ -14,11 +14,11 @@ import pines from "../assets/poi/pines.png";
 import mountains from "../assets/poi/mountains.png";
 import peak from "../assets/poi/peak.png";
 
-// Hand-drawn engraving POIs rendered as a DOM sprite overlay, the same way
-// LabelLayer draws names: query the vector source, project each feature every
-// frame, and show only what's explored. Landmarks come straight from point
-// features; nature icons are DERIVED from area data (option B) — forest patches
-// become a tree at their centre, clustered peaks become a mountain range.
+// Hand-drawn engraving POIs as a DOM sprite overlay. Landmarks come from point
+// features; nature icons are DERIVED from area data — a forest patch becomes a
+// little cluster of trees of varying size, a mountain range a cluster of peaks,
+// the way a hand-drawn map draws them. Icons are a FIXED size (they don't keep
+// multiplying/growing as you zoom), base-anchored, decluttered, and fog-gated.
 
 type IconName =
   | "castle" | "church" | "monument" | "obelisk" | "ruins" | "lighthouse"
@@ -28,15 +28,27 @@ const SRC_URL: Record<IconName, string> = {
   castle, church, monument, obelisk, ruins, lighthouse, village, hamlet, oak, pines, mountains, peak,
 };
 
-const LANDMARK_ZOOM = 11; // OSM only carries most POIs this close in
-const FOREST_ZOOM = 9;
-const PEAK_ZOOM = 7;
-const MAX_ICONS = 42;
+// Fixed on-screen height (CSS px) per icon — constant across zoom.
+const BASE_H: Record<IconName, number> = {
+  castle: 50, church: 50, monument: 44, obelisk: 42, ruins: 40, lighthouse: 48,
+  village: 44, hamlet: 38, oak: 40, pines: 44, mountains: 60, peak: 42,
+};
 
-// Icon height in CSS px grows with zoom but stays within sane bounds.
-function iconHeight(z: number): number {
-  return Math.max(18, Math.min(58, Math.round((z - 10) * 7 + 14)));
+const LANDMARK_ZOOM = 12;   // landmarks turn on here and stay a stable set
+const FOREST_ZOOM = 10;
+const PEAK_RANGE_ZOOM = 7;  // show a single range symbol at regional zoom
+const PEAK_DETAIL_ZOOM = 10; // resolve into individual peaks closer in
+const MIN_ELE = 700;        // metres — excludes city hills (Montmartre ~130m)
+const MAX_LANDMARKS = 34;
+const MAX_NATURE = 90;
+
+// deterministic pseudo-random in [0,1) from two numbers, so derived clusters
+// don't flicker or jump between rebuilds.
+function rand(x: number, y: number): number {
+  const h = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return h - Math.floor(h);
 }
+const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 
 function landmarkIcon(f: MapGeoJSONFeature): IconName | null {
   const p = (f.properties ?? {}) as Record<string, unknown>;
@@ -44,18 +56,20 @@ function landmarkIcon(f: MapGeoJSONFeature): IconName | null {
   const sub = String(p.subclass ?? "");
   const s = sub || cls;
   if (["castle", "fort", "fortress", "city_gate", "citywalls", "bunker", "manor"].includes(s)) return "castle";
-  if (cls === "place_of_worship" || ["church", "cathedral", "chapel", "monastery", "basilica", "shrine", "place_of_worship"].includes(s)) return "church";
-  if (s === "obelisk") return "obelisk";
-  if (["monument", "memorial", "column", "statue", "artwork"].includes(s)) return "monument";
+  if (cls === "place_of_worship" || ["church", "cathedral", "chapel", "monastery", "basilica"].includes(s)) return "church";
+  // Obelisk icon ONLY for genuinely column/tower-shaped things — not the flood
+  // of memorials/statues/artworks that used to all become obelisks.
+  if (["obelisk", "tower", "column", "campanile", "bell_tower", "chimney"].includes(s)) return "obelisk";
+  if (s === "monument") return "monument";
   if (["ruins", "ruin", "archaeological_site"].includes(s)) return "ruins";
   if (["lighthouse", "beacon"].includes(s)) return "lighthouse";
   return null;
 }
 
-interface Pick { icon: IconName; lng: number; lat: number; rank: number; }
-interface Item { el: HTMLDivElement; img: HTMLImageElement; lng: number; lat: number; }
+interface Pick { icon: IconName; lng: number; lat: number; rank: number; scale: number; }
+interface Item { el: HTMLDivElement; img: HTMLImageElement; icon: IconName; scale: number; lng: number; lat: number; }
 
-function geomBBox(g: GeoJSON.Geometry): { minLng: number; minLat: number; maxLng: number; maxLat: number } | null {
+function geomBBox(g: GeoJSON.Geometry) {
   let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
   const scan = (co: unknown): void => {
     if (typeof (co as number[])[0] === "number") {
@@ -64,8 +78,7 @@ function geomBBox(g: GeoJSON.Geometry): { minLng: number; minLat: number; maxLng
     } else for (const k of co as unknown[]) scan(k);
   };
   try { scan((g as { coordinates: unknown }).coordinates); } catch { return null; }
-  if (a === Infinity) return null;
-  return { minLng: a, minLat: b, maxLng: c, maxLat: d };
+  return a === Infinity ? null : { minLng: a, minLat: b, maxLng: c, maxLat: d };
 }
 
 type Box = [number, number, number, number];
@@ -135,27 +148,106 @@ export class PoiLayer {
     }
   }
 
-  private gatherNature(src: string, z: number, picks: Pick[]) {
-    // Peaks → cluster nearby summits into a range, else a lone peak.
-    if (z >= PEAK_ZOOM) {
-      const cell = 80;
-      const cells = new Map<string, { lng: number; lat: number; n: number }>();
+  private revealed(lng: number, lat: number): boolean {
+    return !this.fog || this.fog.isRevealed(lng, lat);
+  }
+
+  // ---- landmarks: point features, decluttered, capped & stable ----
+  private gatherLandmarks(src: string): Pick[] {
+    const raw: Pick[] = [];
+    for (const f of this.query(src, "poi")) {
+      if (f.geometry?.type !== "Point") continue;
+      const ic = landmarkIcon(f);
+      if (!ic) continue;
+      const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates;
+      if (!this.revealed(lng, lat)) continue;
+      raw.push({ icon: ic, lng, lat, rank: Number((f.properties as Record<string, unknown>)?.rank ?? 50), scale: 1 });
+    }
+    for (const f of this.query(src, "place")) {
+      if (f.geometry?.type !== "Point") continue;
+      const cls = String((f.properties as Record<string, unknown>)?.class ?? "");
+      const ic: IconName | null = cls === "hamlet" ? "hamlet" : cls === "village" || cls === "town" ? "village" : null;
+      if (!ic) continue;
+      const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates;
+      if (!this.revealed(lng, lat)) continue;
+      raw.push({ icon: ic, lng, lat, rank: Number((f.properties as Record<string, unknown>)?.rank ?? 40) + 6, scale: 1 });
+    }
+    // de-duplicate, then declutter by importance
+    const seen = new Set<string>();
+    const uniq = raw.filter((p) => {
+      const k = `${p.icon}@${p.lng.toFixed(3)},${p.lat.toFixed(3)}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    uniq.sort((a, b) => a.rank - b.rank);
+    const placed: Box[] = [];
+    const out: Pick[] = [];
+    for (const p of uniq) {
+      if (out.length >= MAX_LANDMARKS) break;
+      const pt = this.map.project([p.lng, p.lat]);
+      const h = BASE_H[p.icon];
+      const box: Box = [pt.x - h * 0.45, pt.y - h, pt.x + h * 0.45, pt.y];
+      if (placed.some((q) => overlaps(q, box, -18))) continue; // keep ~18px gap
+      placed.push(box);
+      out.push(p);
+    }
+    return out;
+  }
+
+  // ---- nature: derived clusters (option B), drawn like a hand-map ----
+  private gatherNature(src: string, z: number): Pick[] {
+    const out: Pick[] = [];
+
+    // Peaks — only genuine high summits, so flat cities show none.
+    const peaks: { lng: number; lat: number; ele: number }[] = [];
+    if (z >= PEAK_RANGE_ZOOM) {
       for (const f of this.query(src, "mountain_peak")) {
         if (f.geometry?.type !== "Point") continue;
+        const pr = (f.properties ?? {}) as Record<string, unknown>;
+        const cls = String(pr.class ?? "peak");
+        if (cls !== "peak" && cls !== "volcano") continue;
+        const ele = Number(pr.ele ?? 0);
+        if (!Number.isFinite(ele) || ele < MIN_ELE) continue;
         const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates;
-        const p = this.map.project([lng, lat]);
-        const k = `${Math.round(p.x / cell)}_${Math.round(p.y / cell)}`;
-        const c = cells.get(k);
-        if (c) { c.lng += lng; c.lat += lat; c.n++; } else cells.set(k, { lng, lat, n: 1 });
-      }
-      for (const c of cells.values()) {
-        picks.push({ icon: c.n >= 2 ? "mountains" : "peak", lng: c.lng / c.n, lat: c.lat / c.n, rank: 20 - c.n });
+        if (!this.revealed(lng, lat)) continue;
+        peaks.push({ lng, lat, ele });
       }
     }
-    // Forest/park patches → a tree at the patch centre, thinned to one per cell.
+    if (z < PEAK_DETAIL_ZOOM) {
+      // regional view: one range symbol per cluster of several high peaks
+      const cell = 170;
+      const groups = new Map<string, { lng: number; lat: number; ele: number; n: number }>();
+      for (const q of peaks) {
+        const p = this.map.project([q.lng, q.lat]);
+        const k = `${Math.round(p.x / cell)}_${Math.round(p.y / cell)}`;
+        const g = groups.get(k);
+        if (g) { g.lng += q.lng; g.lat += q.lat; g.ele = Math.max(g.ele, q.ele); g.n++; }
+        else groups.set(k, { lng: q.lng, lat: q.lat, ele: q.ele, n: 1 });
+      }
+      for (const g of groups.values()) {
+        if (g.n < 3) continue; // a real chain, not a lone bump
+        out.push({ icon: "mountains", lng: g.lng / g.n, lat: g.lat / g.n, rank: 5, scale: clamp(0.9 + g.n / 10, 0.9, 1.5) });
+      }
+    } else {
+      // closer in: individual peaks, sized by elevation, thinned by spacing
+      const cell = 58;
+      const best = new Map<string, { lng: number; lat: number; ele: number }>();
+      for (const q of peaks) {
+        const p = this.map.project([q.lng, q.lat]);
+        const k = `${Math.round(p.x / cell)}_${Math.round(p.y / cell)}`;
+        const e = best.get(k);
+        if (!e || q.ele > e.ele) best.set(k, q);
+      }
+      for (const q of best.values()) {
+        out.push({ icon: "peak", lng: q.lng, lat: q.lat, rank: 8, scale: clamp(0.7 + (q.ele - MIN_ELE) / 2500, 0.7, 1.6) });
+      }
+    }
+
+    // Forest / park patches — a small cluster of trees of varying size.
     if (z >= FOREST_ZOOM) {
-      const cand: { lng: number; lat: number; area: number; icon: IconName }[] = [];
-      const take = (feats: MapGeoJSONFeature[], icon: IconName) => {
+      const patches: { minLng: number; minLat: number; maxLng: number; maxLat: number; area: number; wood: boolean }[] = [];
+      const take = (feats: MapGeoJSONFeature[], wood: boolean) => {
         for (const f of feats) {
           if (!f.geometry) continue;
           const bb = geomBBox(f.geometry);
@@ -163,81 +255,60 @@ export class PoiLayer {
           const a = this.map.project([bb.maxLng, bb.minLat]);
           const b = this.map.project([bb.minLng, bb.maxLat]);
           const area = Math.abs((a.x - b.x) * (a.y - b.y));
-          if (area < 1600) continue; // skip tile-edge slivers (~40x40px)
-          cand.push({ lng: (bb.minLng + bb.maxLng) / 2, lat: (bb.minLat + bb.maxLat) / 2, area, icon });
+          if (area < 3000) continue;
+          patches.push({ ...bb, area, wood });
         }
       };
-      take(this.query(src, "landcover", ["==", "class", "wood"]), "pines");
-      take(this.query(src, "park"), "oak");
-      const cell = 120;
-      const best = new Map<string, { lng: number; lat: number; area: number; icon: IconName }>();
-      for (const c of cand) {
-        const p = this.map.project([c.lng, c.lat]);
+      take(this.query(src, "landcover", ["==", "class", "wood"]), true);
+      take(this.query(src, "park"), false);
+      // thin to one patch per big cell (keep the largest)
+      const cell = 150;
+      const best = new Map<string, (typeof patches)[number]>();
+      for (const c of patches) {
+        const cx = (c.minLng + c.maxLng) / 2, cy = (c.minLat + c.maxLat) / 2;
+        const p = this.map.project([cx, cy]);
         const k = `${Math.round(p.x / cell)}_${Math.round(p.y / cell)}`;
         const e = best.get(k);
         if (!e || c.area > e.area) best.set(k, c);
       }
-      for (const c of best.values()) picks.push({ icon: c.icon, lng: c.lng, lat: c.lat, rank: 30 });
+      for (const c of best.values()) {
+        const cx = (c.minLng + c.maxLng) / 2, cy = (c.minLat + c.maxLat) / 2;
+        if (!this.revealed(cx, cy)) continue;
+        const n = clamp(Math.round(Math.sqrt(c.area) / 60), 2, 5); // 2–5 trees by size
+        const spanLng = (c.maxLng - c.minLng) * 0.34, spanLat = (c.maxLat - c.minLat) * 0.34;
+        for (let i = 0; i < n; i++) {
+          const r1 = rand(cx * 1000 + i, cy * 1000);
+          const r2 = rand(cy * 1000 + i * 7, cx * 1000);
+          const lng = cx + (r1 - 0.5) * 2 * spanLng;
+          const lat = cy + (r2 - 0.5) * 2 * spanLat;
+          const r3 = rand(i + cx, cy - i);
+          const icon: IconName = c.wood ? (r3 > 0.82 ? "oak" : "pines") : (r3 > 0.3 ? "oak" : "pines");
+          out.push({ icon, lng, lat, rank: 30, scale: 0.72 + rand(lng, lat) * 0.6 }); // 0.72–1.32
+        }
+      }
     }
+    return out.slice(0, MAX_NATURE);
   }
 
   private rebuild() {
     const src = this.vectorSource();
     if (!src) return;
     const z = this.map.getZoom();
-    const picks: Pick[] = [];
 
-    if (z >= LANDMARK_ZOOM) {
-      for (const f of this.query(src, "poi")) {
-        if (f.geometry?.type !== "Point") continue;
-        const ic = landmarkIcon(f);
-        if (!ic) continue;
-        const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates;
-        picks.push({ icon: ic, lng, lat, rank: Number((f.properties as Record<string, unknown>)?.rank ?? 50) });
-      }
-      for (const f of this.query(src, "place")) {
-        if (f.geometry?.type !== "Point") continue;
-        const cls = String((f.properties as Record<string, unknown>)?.class ?? "");
-        const ic: IconName | null = cls === "hamlet" ? "hamlet" : cls === "village" || cls === "town" ? "village" : null;
-        if (!ic) continue;
-        const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates;
-        picks.push({ icon: ic, lng, lat, rank: Number((f.properties as Record<string, unknown>)?.rank ?? 40) + 6 });
-      }
-    }
-    this.gatherNature(src, z, picks);
-
-    // fog-gate + de-duplicate
-    const seen = new Set<string>();
-    const uniq: Pick[] = [];
-    for (const p of picks) {
-      if (this.fog && !this.fog.isRevealed(p.lng, p.lat)) continue;
-      const k = `${p.icon}@${p.lng.toFixed(3)},${p.lat.toFixed(3)}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      uniq.push(p);
-    }
-    uniq.sort((a, b) => a.rank - b.rank);
-
-    // declutter: greedily keep the highest-ranked icon that doesn't collide
-    const h = iconHeight(z);
-    const placed: Box[] = [];
-    const chosen: Pick[] = [];
-    for (const p of uniq) {
-      if (chosen.length >= MAX_ICONS) break;
-      const pt = this.map.project([p.lng, p.lat]);
-      const w = h * 0.95;
-      const box: Box = [pt.x - w / 2, pt.y - h, pt.x + w / 2, pt.y];
-      if (placed.some((q) => overlaps(q, box, h * 0.28))) continue;
-      placed.push(box);
-      chosen.push(p);
+    let picks: Pick[] = [];
+    try {
+      if (z >= LANDMARK_ZOOM) picks = picks.concat(this.gatherLandmarks(src));
+      picks = picks.concat(this.gatherNature(src, z));
+    } catch {
+      return;
     }
 
-    // draw north→south so southern (lower) icons overlap in front
-    chosen.sort((a, b) => b.lat - a.lat);
+    // south-most drawn last so lower icons overlap in front
+    picks.sort((a, b) => b.lat - a.lat);
 
     this.root.textContent = "";
     this.items = [];
-    for (const p of chosen) {
+    for (const p of picks) {
       const el = document.createElement("div");
       el.className = "mapicon";
       const img = document.createElement("img");
@@ -246,7 +317,7 @@ export class PoiLayer {
       img.decoding = "async";
       el.appendChild(img);
       this.root.appendChild(el);
-      this.items.push({ el, img, lng: p.lng, lat: p.lat });
+      this.items.push({ el, img, icon: p.icon, scale: p.scale, lng: p.lng, lat: p.lat });
     }
     this.reposition();
   }
@@ -254,15 +325,14 @@ export class PoiLayer {
   private reposition() {
     const c = this.map.getCanvas();
     const W = c.clientWidth, H = c.clientHeight;
-    const h = iconHeight(this.map.getZoom());
     for (const it of this.items) {
       const pt = this.map.project([it.lng, it.lat]);
-      if (pt.x < -60 || pt.x > W + 60 || pt.y < -80 || pt.y > H + 40) {
+      if (pt.x < -60 || pt.x > W + 60 || pt.y < -90 || pt.y > H + 40) {
         it.el.style.display = "none";
         continue;
       }
       it.el.style.display = "";
-      it.img.style.height = `${h}px`;
+      it.img.style.height = `${Math.round(BASE_H[it.icon] * it.scale)}px`;
       it.el.style.zIndex = String(Math.round((90 - it.lat) * 40));
       it.el.style.transform = `translate(${pt.x}px, ${pt.y}px) translate(-50%, -100%)`;
     }
