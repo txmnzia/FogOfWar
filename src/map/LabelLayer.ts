@@ -1,6 +1,7 @@
 import type { Map as MlMap, MapGeoJSONFeature } from "maplibre-gl";
 import type { FogLayer } from "./FogLayer";
 import { crestSvg } from "../lib/crest";
+import type { Cell, Pin } from "../lib/types";
 
 // A styled label overlay. MapLibre's native labels need pre-baked glyph fonts, so
 // they can't use a web font like Cinzel. Instead we read the place + water names
@@ -51,12 +52,14 @@ function sizeFor(kind: Kind, z: number): number {
   }
 }
 
-function visibleAt(kind: Kind, z: number): boolean {
+// A discovered realm (see Discovery) never fades out when zooming in; only the
+// low-zoom floor applies so the world view doesn't drown in names.
+function visibleAt(kind: Kind, z: number, discovered: boolean): boolean {
   switch (kind) {
     case "country":
-      return z >= 2 && z <= 6.5;
+      return z >= 2 && (z <= 6.5 || discovered);
     case "region":
-      return z >= 3.5 && z <= 9;
+      return z >= 3.5 && (z <= 9 || discovered);
     case "city":
       return z >= 5;
     case "town":
@@ -77,6 +80,75 @@ interface Item {
 // Realms (countries, regions, cities) get a heraldic crest above the name.
 const REALM_KINDS = new Set<Kind>(["country", "region", "city"]);
 
+// A realm counts as discovered once enough explored ground lies within a radius
+// of its label point. It's a proxy for "a significant part was explored" (we have
+// no borders client-side), but unlike the fog pixel check it doesn't depend on
+// zoom, so a discovered realm's crest stays put at every zoom level.
+const DISCOVERY: Partial<Record<Kind, { radiusKm: number; minCells: number }>> = {
+  country: { radiusKm: 150, minCells: 25 },
+  region: { radiusKm: 60, minCells: 10 },
+  city: { radiusKm: 12, minCells: 3 },
+};
+
+const KM_PER_DEG = 111.32;
+
+/** Explored cells bucketed into a 1° grid for cheap radius counts. */
+class Discovery {
+  private grid = new Map<string, Array<[number, number]>>();
+  private pins: Pin[] = [];
+  private cache = new Map<string, boolean>();
+
+  set(cells: Cell[], pins: Pin[]) {
+    this.grid.clear();
+    this.cache.clear();
+    this.pins = pins;
+    for (const c of cells) {
+      const k = Math.floor(c.lat) + "|" + Math.floor(c.lng);
+      let b = this.grid.get(k);
+      if (!b) this.grid.set(k, (b = []));
+      b.push([c.lat, c.lng]);
+    }
+  }
+
+  isDiscovered(kind: Kind, lng: number, lat: number): boolean {
+    const rule = DISCOVERY[kind];
+    if (!rule) return false;
+    const key = kind + "|" + lng.toFixed(3) + "|" + lat.toFixed(3);
+    let v = this.cache.get(key);
+    if (v === undefined) {
+      v = this.compute(rule.radiusKm, rule.minCells, lng, lat);
+      this.cache.set(key, v);
+    }
+    return v;
+  }
+
+  private compute(radiusKm: number, minCells: number, lng: number, lat: number): boolean {
+    const cosLat = Math.max(Math.cos((lat * Math.PI) / 180), 0.01);
+    const distKm = (la: number, ln: number) => {
+      const dy = (la - lat) * KM_PER_DEG;
+      const dx = (ln - lng) * KM_PER_DEG * cosLat;
+      return Math.hypot(dx, dy);
+    };
+    // A pin is a deliberate "I was here", so one inside the radius is enough.
+    for (const p of this.pins) {
+      if (distKm(p.lat, p.lng) <= radiusKm + p.radiusM / 1000) return true;
+    }
+    const dLat = radiusKm / KM_PER_DEG;
+    const dLng = Math.min(radiusKm / (KM_PER_DEG * cosLat), 180);
+    let n = 0;
+    for (let y = Math.floor(lat - dLat); y <= Math.floor(lat + dLat); y++) {
+      for (let x = Math.floor(lng - dLng); x <= Math.floor(lng + dLng); x++) {
+        const b = this.grid.get(y + "|" + x);
+        if (!b) continue;
+        for (const [la, ln] of b) {
+          if (distKm(la, ln) <= radiusKm && ++n >= minCells) return true;
+        }
+      }
+    }
+    return false;
+  }
+}
+
 export class LabelLayer {
   private map: MlMap;
   private fog: FogLayer | null;
@@ -85,6 +157,7 @@ export class LabelLayer {
   private srcName: string | null = null;
   private moveRaf = 0;
   private rebuildTimer = 0;
+  private discovery = new Discovery();
 
   private onMove = () => {
     if (this.moveRaf) return;
@@ -110,6 +183,11 @@ export class LabelLayer {
     map.on("zoomend", this.onSettle);
     map.on("sourcedata", this.onSourceData);
     this.rebuild();
+  }
+
+  /** Explored data used to decide which realms are discovered. */
+  setExplored(cells: Cell[], pins: Pin[]) {
+    this.discovery.set(cells, pins);
   }
 
   /** Re-evaluate labels (e.g. after explored data changes). */
@@ -146,6 +224,7 @@ export class LabelLayer {
       lng: number;
       lat: number;
       rank: number;
+      discovered: boolean;
     }
     const chosen = new Map<string, Pick>();
 
@@ -156,13 +235,15 @@ export class LabelLayer {
         const name = String(props.name_en ?? props.name ?? "");
         if (!name) continue;
         const kind = toKind(String(props.class ?? ""));
-        if (!kind || !visibleAt(kind, z)) continue;
+        if (!kind) continue;
+        const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates;
+        const discovered = this.discovery.isDiscovered(kind, lng, lat);
+        if (!visibleAt(kind, z, discovered)) continue;
         const rank = Number(props.rank ?? props.symbolrank ?? 50);
         const key = kind + "|" + name.toLowerCase();
         const prev = chosen.get(key);
         if (!prev || rank < prev.rank) {
-          const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates;
-          chosen.set(key, { kind, name, lng, lat, rank });
+          chosen.set(key, { kind, name, lng, lat, rank, discovered });
         }
       }
     };
@@ -181,7 +262,8 @@ export class LabelLayer {
     for (const it of list) {
       // Labels sit above the clouds now, so only show ones over explored (or
       // open-sea) ground — otherwise unexplored place names would float on the fog.
-      if (this.fog && !this.fog.isRevealed(it.lng, it.lat)) continue;
+      // Discovered realms are the exception: once earned, they always show.
+      if (!it.discovered && this.fog && !this.fog.isRevealed(it.lng, it.lat)) continue;
       const el = document.createElement("div");
       el.className = "maplabel " + it.kind;
       let crestEl: HTMLElement | null = null;

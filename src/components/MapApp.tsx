@@ -83,6 +83,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
     const map = mapRef.current;
     if (!fog || !map || !loaded) return;
     fog.setData(displayCells, pins);
+    labelsRef.current?.setExplored(displayCells, pins);
     // Re-evaluate labels after the fog reveal for the new data is rendered.
     requestAnimationFrame(() => labelsRef.current?.refresh());
 
