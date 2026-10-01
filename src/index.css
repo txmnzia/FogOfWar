@@ -206,6 +206,14 @@ input[type="range"]::-moz-range-thumb {
 }
 .dropzone:hover { border-color: var(--brass); background: rgba(201,162,75,0.06); }
 
+/* ---- hand-drawn POI icons (sprite overlay above the fog) ---- */
+.mapicons { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 3; }
+.mapicon {
+  position: absolute; top: 0; left: 0; transform-origin: bottom center; will-change: transform;
+  filter: drop-shadow(0 3px 3px rgba(60, 44, 20, 0.35));
+}
+.mapicon img { display: block; width: auto; }
+
 /* ---- engraved place labels (rendered overlay, below the fog) ---- */
 .maplabels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 3; }
 .maplabel {

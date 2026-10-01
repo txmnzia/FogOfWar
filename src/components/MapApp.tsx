@@ -4,6 +4,7 @@ import { getHexagonAreaAvg } from "h3-js";
 import { MapView } from "../map/MapView";
 import { FogLayer } from "../map/FogLayer";
 import { LabelLayer } from "../map/LabelLayer";
+import { PoiLayer } from "../map/PoiLayer";
 import { MapChrome } from "./MapChrome";
 import { MenuPanel } from "./MenuPanel";
 import { ImportScreen } from "./ImportScreen";
@@ -42,6 +43,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
   const mapRef = useRef<MlMap | null>(null);
   const fogRef = useRef<FogLayer | null>(null);
   const labelsRef = useRef<LabelLayer | null>(null);
+  const poisRef = useRef<PoiLayer | null>(null);
   const fittedRef = useRef(false);
   const saveTimer = useRef<number>();
   const settingsRef = useRef(settings);
@@ -74,6 +76,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
     fogRef.current = new FogLayer(map, settingsRef.current);
     fogRef.current.setTuning(tuningRef.current);
     labelsRef.current = new LabelLayer(map, fogRef.current);
+    poisRef.current = new PoiLayer(map, fogRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -84,8 +87,11 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
     if (!fog || !map || !loaded) return;
     fog.setData(displayCells, pins);
     labelsRef.current?.setExplored(displayCells, pins);
-    // Re-evaluate labels after the fog reveal for the new data is rendered.
-    requestAnimationFrame(() => labelsRef.current?.refresh());
+    // Re-evaluate labels + icons after the fog reveal for the new data renders.
+    requestAnimationFrame(() => {
+      labelsRef.current?.refresh();
+      poisRef.current?.refresh();
+    });
 
     if (!fittedRef.current && (displayCells.length > 0 || pins.length > 0)) {
       fittedRef.current = true;
@@ -106,6 +112,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
 
   useEffect(
     () => () => {
+      poisRef.current?.destroy();
       labelsRef.current?.destroy();
       fogRef.current?.destroy();
     },
