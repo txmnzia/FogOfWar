@@ -31,12 +31,17 @@ const SRC_URL: Record<IconName, string> = {
   castle, church, monument, obelisk, ruins, lighthouse, village, hamlet, house, house2, oak, pines, fir, mountains, peak,
 };
 
-// Fixed on-screen height (CSS px) per icon — this sets the RELATIVE sizes
-// between types: a mountain range reads much bigger than a cottage.
-const BASE_H: Record<IconName, number> = {
-  castle: 52, church: 52, monument: 44, obelisk: 42, ruins: 40, lighthouse: 48,
-  village: 46, hamlet: 38, house: 30, house2: 30, oak: 42, pines: 46, fir: 40, mountains: 66, peak: 50,
+// Real-world footprint (metres of latitude) each icon stands for. Icons are
+// drawn at this size projected to the screen, so they're PINNED to the map:
+// they grow/shrink with zoom like they're painted on the terrain, and a
+// mountain range reads far bigger than a cottage. Clamped so they never vanish
+// or fill the screen. (mountains tuned to ~25px at zoom 7.7 over the Alps.)
+const BASE_M: Record<IconName, number> = {
+  castle: 320, church: 340, monument: 300, obelisk: 300, ruins: 260, lighthouse: 320,
+  village: 380, hamlet: 300, house: 210, house2: 210, oak: 1300, pines: 1400, fir: 1200, mountains: 5800, peak: 1200,
 };
+const MIN_PX = 12;
+const MAX_PX = 110;
 
 // Icons that may be mirrored for variety (landmarks stay as drawn so they read
 // clearly; organic things and generic houses can flip without looking wrong).
@@ -49,6 +54,13 @@ const PEAK_DETAIL_ZOOM = 10; // resolve into individual peaks closer in
 const MIN_ELE = 700;        // metres — excludes city hills (Montmartre ~130m)
 const MAX_LANDMARKS = 34;
 const MAX_NATURE = 90;
+// Clustering uses FIXED geographic grids (degrees), not screen cells, so the
+// derived mountain-range and forest icons keep a stable position on the map as
+// you zoom and pan — they don't jump around.
+const RANGE_CELL = 0.42;    // ~45km: groups peaks into a named range
+const PEAK_CELL = 0.025;    // ~2.5km: spacing between individual peaks
+const FOREST_CELL = 0.03;   // ~3km: one wood cluster per cell
+const FOREST_MIN_DEG2 = 0.00035; // ~geographic area to count as a real wood
 
 // deterministic pseudo-random in [0,1) from two numbers, so derived clusters
 // don't flicker or jump between rebuilds.
@@ -171,6 +183,17 @@ export class PoiLayer {
     return !this.fog || this.fog.isRevealed(lng, lat);
   }
 
+  // Pixel height for a given real-world height (metres) at a location — this is
+  // what pins icon size to the map so it scales with zoom.
+  private pxForMeters(lng: number, lat: number, m: number): number {
+    const p1 = this.map.project([lng, lat]);
+    const p2 = this.map.project([lng, lat + m / 111320]);
+    return Math.abs(p1.y - p2.y);
+  }
+  private iconPx(icon: IconName, lng: number, lat: number, scale: number): number {
+    return clamp(this.pxForMeters(lng, lat, BASE_M[icon] * scale), MIN_PX, MAX_PX);
+  }
+
   // ---- landmarks: point features, decluttered, capped & stable ----
   private gatherLandmarks(src: string): Pick[] {
     const raw: Pick[] = [];
@@ -205,9 +228,9 @@ export class PoiLayer {
     for (const p of uniq) {
       if (out.length >= MAX_LANDMARKS) break;
       const pt = this.map.project([p.lng, p.lat]);
-      const h = BASE_H[p.icon];
+      const h = this.iconPx(p.icon, p.lng, p.lat, p.scale);
       const box: Box = [pt.x - h * 0.45, pt.y - h, pt.x + h * 0.45, pt.y];
-      if (placed.some((q) => overlaps(q, box, -18))) continue; // keep ~18px gap
+      if (placed.some((q) => overlaps(q, box, -14))) continue; // keep a small gap
       placed.push(box);
       out.push(p);
     }
@@ -234,28 +257,26 @@ export class PoiLayer {
       }
     }
     if (z < PEAK_DETAIL_ZOOM) {
-      // regional view: one range symbol per cluster of several high peaks
-      const cell = 170;
-      const groups = new Map<string, { lng: number; lat: number; ele: number; n: number }>();
+      // regional view: one range symbol per FIXED geo cell holding several high
+      // peaks — placed at the cell centre so it never jumps when you zoom/pan.
+      const groups = new Map<string, { n: number; ele: number }>();
       for (const q of peaks) {
-        const p = this.map.project([q.lng, q.lat]);
-        const k = `${Math.round(p.x / cell)}_${Math.round(p.y / cell)}`;
+        const k = `${Math.floor(q.lng / RANGE_CELL)}_${Math.floor(q.lat / RANGE_CELL)}`;
         const g = groups.get(k);
-        if (g) { g.lng += q.lng; g.lat += q.lat; g.ele = Math.max(g.ele, q.ele); g.n++; }
-        else groups.set(k, { lng: q.lng, lat: q.lat, ele: q.ele, n: 1 });
+        if (g) { g.n++; g.ele = Math.max(g.ele, q.ele); } else groups.set(k, { n: 1, ele: q.ele });
       }
-      for (const g of groups.values()) {
+      for (const [k, g] of groups) {
         if (g.n < 3) continue; // a real chain, not a lone bump
-        const lng = g.lng / g.n, lat = g.lat / g.n;
-        out.push({ icon: "mountains", lng, lat, rank: 5, scale: clamp(0.9 + g.n / 10, 0.9, 1.5), flip: rand(lat * 17, lng * 17) > 0.5 });
+        const [gx, gy] = k.split("_").map(Number);
+        const lng = (gx + 0.5) * RANGE_CELL, lat = (gy + 0.5) * RANGE_CELL;
+        if (!this.revealed(lng, lat)) continue;
+        out.push({ icon: "mountains", lng, lat, rank: 5, scale: clamp(0.85 + g.n / 26, 0.85, 1.2), flip: rand(gx * 17, gy * 17) > 0.5 });
       }
     } else {
-      // closer in: individual peaks, sized by elevation, thinned by spacing
-      const cell = 58;
+      // closer in: individual peaks on a fixed geo grid, highest per cell, by ele
       const best = new Map<string, { lng: number; lat: number; ele: number }>();
       for (const q of peaks) {
-        const p = this.map.project([q.lng, q.lat]);
-        const k = `${Math.round(p.x / cell)}_${Math.round(p.y / cell)}`;
+        const k = `${Math.floor(q.lng / PEAK_CELL)}_${Math.floor(q.lat / PEAK_CELL)}`;
         const e = best.get(k);
         if (!e || q.ele > e.ele) best.set(k, q);
       }
@@ -264,49 +285,39 @@ export class PoiLayer {
       }
     }
 
-    // Forest / park patches — a small cluster of trees of varying size.
+    // Forest / park patches → a stable grove of 3–4 trees per fixed geo cell.
     if (z >= FOREST_ZOOM) {
-      const patches: { minLng: number; minLat: number; maxLng: number; maxLat: number; area: number; wood: boolean }[] = [];
+      const cells = new Map<string, { area: number; wood: boolean }>();
       const take = (feats: MapGeoJSONFeature[], wood: boolean) => {
         for (const f of feats) {
           if (!f.geometry) continue;
           const bb = geomBBox(f.geometry);
           if (!bb) continue;
-          const a = this.map.project([bb.maxLng, bb.minLat]);
-          const b = this.map.project([bb.minLng, bb.maxLat]);
-          const area = Math.abs((a.x - b.x) * (a.y - b.y));
-          if (area < 3000) continue;
-          patches.push({ ...bb, area, wood });
+          const area = (bb.maxLng - bb.minLng) * (bb.maxLat - bb.minLat); // deg² — zoom-independent
+          if (area < FOREST_MIN_DEG2) continue;
+          const cx = (bb.minLng + bb.maxLng) / 2, cy = (bb.minLat + bb.maxLat) / 2;
+          const k = `${Math.floor(cx / FOREST_CELL)}_${Math.floor(cy / FOREST_CELL)}`;
+          const e = cells.get(k);
+          if (!e || area > e.area) cells.set(k, { area, wood });
         }
       };
       take(this.query(src, "landcover", ["==", "class", "wood"]), true);
       take(this.query(src, "park"), false);
-      // thin to one patch per big cell (keep the largest)
-      const cell = 150;
-      const best = new Map<string, (typeof patches)[number]>();
-      for (const c of patches) {
-        const cx = (c.minLng + c.maxLng) / 2, cy = (c.minLat + c.maxLat) / 2;
-        const p = this.map.project([cx, cy]);
-        const k = `${Math.round(p.x / cell)}_${Math.round(p.y / cell)}`;
-        const e = best.get(k);
-        if (!e || c.area > e.area) best.set(k, c);
-      }
-      for (const c of best.values()) {
-        const cx = (c.minLng + c.maxLng) / 2, cy = (c.minLat + c.maxLat) / 2;
+      for (const [k, c] of cells) {
+        const [gx, gy] = k.split("_").map(Number);
+        const cx = (gx + 0.5) * FOREST_CELL, cy = (gy + 0.5) * FOREST_CELL;
         if (!this.revealed(cx, cy)) continue;
-        const n = clamp(Math.round(Math.sqrt(c.area) / 60), 2, 5); // 2–5 trees by size
-        const spanLng = (c.maxLng - c.minLng) * 0.34, spanLat = (c.maxLat - c.minLat) * 0.34;
+        const n = rand(gx, gy) > 0.5 ? 4 : 3; // a little grove of 3–4
         for (let i = 0; i < n; i++) {
-          const r1 = rand(cx * 1000 + i, cy * 1000);
-          const r2 = rand(cy * 1000 + i * 7, cx * 1000);
-          const lng = cx + (r1 - 0.5) * 2 * spanLng;
-          const lat = cy + (r2 - 0.5) * 2 * spanLat;
-          const r3 = rand(i + cx, cy - i);
+          const r1 = rand(gx * 7 + i, gy * 3), r2 = rand(gy * 7 + i * 5, gx * 3);
+          const lng = cx + (r1 - 0.5) * FOREST_CELL * 0.7;
+          const lat = cy + (r2 - 0.5) * FOREST_CELL * 0.7;
+          const r3 = rand(i + gx, gy - i);
           // mix clumps, lone firs and oaks so a wood isn't one repeated stamp
           const icon: IconName = c.wood
             ? (r3 < 0.45 ? "pines" : r3 < 0.8 ? "fir" : "oak")
             : (r3 < 0.6 ? "oak" : r3 < 0.85 ? "fir" : "pines");
-          out.push({ icon, lng, lat, rank: 30, scale: 0.72 + rand(lng, lat) * 0.6, flip: rand(lat, lng) > 0.5 }); // 0.72–1.32
+          out.push({ icon, lng, lat, rank: 30, scale: 0.78 + rand(lng, lat) * 0.5, flip: rand(lat, lng) > 0.5 });
         }
       }
     }
@@ -355,7 +366,7 @@ export class PoiLayer {
         continue;
       }
       it.el.style.display = "";
-      it.img.style.height = `${Math.round(BASE_H[it.icon] * it.scale)}px`;
+      it.img.style.height = `${Math.round(this.iconPx(it.icon, it.lng, it.lat, it.scale))}px`;
       it.el.style.zIndex = String(Math.round((90 - it.lat) * 40));
       it.el.style.transform = `translate(${pt.x}px, ${pt.y}px) translate(-50%, -100%)${it.flip ? " scaleX(-1)" : ""}`;
     }
