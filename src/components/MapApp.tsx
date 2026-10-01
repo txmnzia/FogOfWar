@@ -36,6 +36,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [zoom, setZoom] = useState(2);
   const [importOpen, setImportOpen] = useState(false);
   const [stravaOpen, setStravaOpen] = useState(false);
   const [photoOpen, setPhotoOpen] = useState(false);
@@ -77,6 +78,8 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
     fogRef.current.setTuning(tuningRef.current);
     labelsRef.current = new LabelLayer(map, fogRef.current);
     poisRef.current = new PoiLayer(map, fogRef.current);
+    setZoom(map.getZoom());
+    map.on("zoom", () => setZoom(map.getZoom()));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -194,6 +197,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
           email={email}
           settings={settings}
           tuning={tuning}
+          zoom={zoom}
           pins={pins}
           onSettings={changeSettings}
           onTuning={changeTuning}

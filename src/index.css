@@ -214,6 +214,15 @@ input[type="range"]::-moz-range-thumb {
 }
 .mapicon img { display: block; width: auto; }
 
+.zoom-readout {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-family: "Cinzel", Georgia, serif; text-transform: uppercase; letter-spacing: 0.12em;
+  font-size: 11px; color: var(--brass, #8a6a3c);
+  padding: 8px 10px; margin-bottom: 12px; border: 1px solid rgba(138,106,60,0.4); border-radius: 5px;
+  background: rgba(138,106,60,0.08);
+}
+.zoom-readout b { font-size: 15px; font-variant-numeric: tabular-nums; color: var(--bone, #e9dcc0); }
+
 /* ---- engraved place labels (rendered overlay, below the fog) ---- */
 .maplabels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 3; }
 .maplabel {

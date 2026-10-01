@@ -8,6 +8,7 @@ interface Props {
   email: string;
   settings: FogSettings;
   tuning: FogTuning;
+  zoom: number;
   pins: Pin[];
   onSettings: (s: FogSettings) => void;
   onTuning: (t: FogTuning) => void;
@@ -89,6 +90,10 @@ export function MenuPanel(p: Props) {
         </button>
         {labOpen && (
           <div style={{ marginTop: 12 }}>
+            <div className="zoom-readout">
+              <span>Current zoom</span>
+              <b>{p.zoom.toFixed(2)}</b>
+            </div>
             <div className="slider">
               <label>Unexplored darkness <b>{Math.round(settings.darkness * 100)}%</b></label>
               <input
