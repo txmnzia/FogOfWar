@@ -9,8 +9,11 @@ import ruins from "../assets/poi/ruins.png";
 import lighthouse from "../assets/poi/lighthouse.png";
 import village from "../assets/poi/village.png";
 import hamlet from "../assets/poi/hamlet.png";
+import house from "../assets/poi/house.png";
+import house2 from "../assets/poi/house2.png";
 import oak from "../assets/poi/oak.png";
 import pines from "../assets/poi/pines.png";
+import fir from "../assets/poi/fir.png";
 import mountains from "../assets/poi/mountains.png";
 import peak from "../assets/poi/peak.png";
 
@@ -22,17 +25,22 @@ import peak from "../assets/poi/peak.png";
 
 type IconName =
   | "castle" | "church" | "monument" | "obelisk" | "ruins" | "lighthouse"
-  | "village" | "hamlet" | "oak" | "pines" | "mountains" | "peak";
+  | "village" | "hamlet" | "house" | "house2" | "oak" | "pines" | "fir" | "mountains" | "peak";
 
 const SRC_URL: Record<IconName, string> = {
-  castle, church, monument, obelisk, ruins, lighthouse, village, hamlet, oak, pines, mountains, peak,
+  castle, church, monument, obelisk, ruins, lighthouse, village, hamlet, house, house2, oak, pines, fir, mountains, peak,
 };
 
-// Fixed on-screen height (CSS px) per icon — constant across zoom.
+// Fixed on-screen height (CSS px) per icon — this sets the RELATIVE sizes
+// between types: a mountain range reads much bigger than a cottage.
 const BASE_H: Record<IconName, number> = {
-  castle: 50, church: 50, monument: 44, obelisk: 42, ruins: 40, lighthouse: 48,
-  village: 44, hamlet: 38, oak: 40, pines: 44, mountains: 60, peak: 42,
+  castle: 52, church: 52, monument: 44, obelisk: 42, ruins: 40, lighthouse: 48,
+  village: 46, hamlet: 38, house: 30, house2: 30, oak: 42, pines: 46, fir: 40, mountains: 66, peak: 50,
 };
+
+// Icons that may be mirrored for variety (landmarks stay as drawn so they read
+// clearly; organic things and generic houses can flip without looking wrong).
+const FLIPPABLE = new Set<IconName>(["house", "house2", "village", "hamlet", "oak", "pines", "fir", "mountains", "peak"]);
 
 const LANDMARK_ZOOM = 12;   // landmarks turn on here and stay a stable set
 const FOREST_ZOOM = 10;
@@ -66,8 +74,19 @@ function landmarkIcon(f: MapGeoJSONFeature): IconName | null {
   return null;
 }
 
-interface Pick { icon: IconName; lng: number; lat: number; rank: number; scale: number; }
-interface Item { el: HTMLDivElement; img: HTMLImageElement; icon: IconName; scale: number; lng: number; lat: number; }
+interface Pick { icon: IconName; lng: number; lat: number; rank: number; scale: number; flip?: boolean; }
+interface Item { el: HTMLDivElement; img: HTMLImageElement; icon: IconName; scale: number; flip: boolean; lng: number; lat: number; }
+
+// Pick a settlement sprite with variety: towns get the full cluster, villages
+// usually a cluster but sometimes a lone house, hamlets a single cottage.
+function settlement(cls: string, lng: number, lat: number): { icon: IconName; scale: number } | null {
+  const r = rand(lng * 997, lat * 997);
+  if (cls === "town") return { icon: "village", scale: 1.05 };
+  if (cls === "village") return r < 0.6 ? { icon: "village", scale: 0.92 } : { icon: r < 0.8 ? "house" : "house2", scale: 1.15 };
+  if (["hamlet", "isolated_dwelling", "suburb", "neighbourhood", "quarter"].includes(cls))
+    return { icon: r < 0.5 ? "house" : "house2", scale: 0.95 };
+  return null;
+}
 
 function geomBBox(g: GeoJSON.Geometry) {
   let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
@@ -166,11 +185,11 @@ export class PoiLayer {
     for (const f of this.query(src, "place")) {
       if (f.geometry?.type !== "Point") continue;
       const cls = String((f.properties as Record<string, unknown>)?.class ?? "");
-      const ic: IconName | null = cls === "hamlet" ? "hamlet" : cls === "village" || cls === "town" ? "village" : null;
-      if (!ic) continue;
       const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates;
+      const s = settlement(cls, lng, lat);
+      if (!s) continue;
       if (!this.revealed(lng, lat)) continue;
-      raw.push({ icon: ic, lng, lat, rank: Number((f.properties as Record<string, unknown>)?.rank ?? 40) + 6, scale: 1 });
+      raw.push({ icon: s.icon, lng, lat, rank: Number((f.properties as Record<string, unknown>)?.rank ?? 40) + 6, scale: s.scale, flip: rand(lat * 13, lng * 13) > 0.5 });
     }
     // de-duplicate, then declutter by importance
     const seen = new Set<string>();
@@ -227,7 +246,8 @@ export class PoiLayer {
       }
       for (const g of groups.values()) {
         if (g.n < 3) continue; // a real chain, not a lone bump
-        out.push({ icon: "mountains", lng: g.lng / g.n, lat: g.lat / g.n, rank: 5, scale: clamp(0.9 + g.n / 10, 0.9, 1.5) });
+        const lng = g.lng / g.n, lat = g.lat / g.n;
+        out.push({ icon: "mountains", lng, lat, rank: 5, scale: clamp(0.9 + g.n / 10, 0.9, 1.5), flip: rand(lat * 17, lng * 17) > 0.5 });
       }
     } else {
       // closer in: individual peaks, sized by elevation, thinned by spacing
@@ -240,7 +260,7 @@ export class PoiLayer {
         if (!e || q.ele > e.ele) best.set(k, q);
       }
       for (const q of best.values()) {
-        out.push({ icon: "peak", lng: q.lng, lat: q.lat, rank: 8, scale: clamp(0.7 + (q.ele - MIN_ELE) / 2500, 0.7, 1.6) });
+        out.push({ icon: "peak", lng: q.lng, lat: q.lat, rank: 8, scale: clamp(0.7 + (q.ele - MIN_ELE) / 2500, 0.7, 1.6), flip: rand(q.lat * 31, q.lng * 31) > 0.5 });
       }
     }
 
@@ -282,8 +302,11 @@ export class PoiLayer {
           const lng = cx + (r1 - 0.5) * 2 * spanLng;
           const lat = cy + (r2 - 0.5) * 2 * spanLat;
           const r3 = rand(i + cx, cy - i);
-          const icon: IconName = c.wood ? (r3 > 0.82 ? "oak" : "pines") : (r3 > 0.3 ? "oak" : "pines");
-          out.push({ icon, lng, lat, rank: 30, scale: 0.72 + rand(lng, lat) * 0.6 }); // 0.72–1.32
+          // mix clumps, lone firs and oaks so a wood isn't one repeated stamp
+          const icon: IconName = c.wood
+            ? (r3 < 0.45 ? "pines" : r3 < 0.8 ? "fir" : "oak")
+            : (r3 < 0.6 ? "oak" : r3 < 0.85 ? "fir" : "pines");
+          out.push({ icon, lng, lat, rank: 30, scale: 0.72 + rand(lng, lat) * 0.6, flip: rand(lat, lng) > 0.5 }); // 0.72–1.32
         }
       }
     }
@@ -317,7 +340,7 @@ export class PoiLayer {
       img.decoding = "async";
       el.appendChild(img);
       this.root.appendChild(el);
-      this.items.push({ el, img, icon: p.icon, scale: p.scale, lng: p.lng, lat: p.lat });
+      this.items.push({ el, img, icon: p.icon, scale: p.scale, flip: !!p.flip && FLIPPABLE.has(p.icon), lng: p.lng, lat: p.lat });
     }
     this.reposition();
   }
@@ -334,7 +357,7 @@ export class PoiLayer {
       it.el.style.display = "";
       it.img.style.height = `${Math.round(BASE_H[it.icon] * it.scale)}px`;
       it.el.style.zIndex = String(Math.round((90 - it.lat) * 40));
-      it.el.style.transform = `translate(${pt.x}px, ${pt.y}px) translate(-50%, -100%)`;
+      it.el.style.transform = `translate(${pt.x}px, ${pt.y}px) translate(-50%, -100%)${it.flip ? " scaleX(-1)" : ""}`;
     }
   }
 }
