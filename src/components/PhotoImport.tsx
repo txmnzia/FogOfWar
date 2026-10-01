@@ -1,5 +1,13 @@
 import { useState } from "react";
-import { collectPhotoPoints, isSidecar, photosToCellIndexes } from "../lib/importPhotos";
+import {
+  collectPhotoPoints,
+  isSidecar,
+  photosToCellIndexes,
+  recordsToCsv,
+  summarize,
+  type PhotoRecord,
+  type PhotoSummary,
+} from "../lib/importPhotos";
 import { addCells } from "../data/repo";
 
 interface Props {
@@ -20,15 +28,19 @@ export function PhotoImport({ userId, onClose, onImported }: Props) {
   const [status, setStatus] = useState<Status>("idle");
   const [detail, setDetail] = useState("");
   const [error, setError] = useState("");
+  const [report, setReport] = useState<{ summary: PhotoSummary; records: PhotoRecord[] } | null>(null);
 
   async function handleFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
     setStatus("working");
     setError("");
+    setReport(null);
     try {
       const sidecars: File[] = [];
+      const media: File[] = [];
       for (let i = 0; i < files.length; i++) {
         if (isSidecar(files[i].name)) sidecars.push(files[i]);
+        else media.push(files[i]);
       }
       if (sidecars.length === 0) {
         throw new Error(
@@ -37,11 +49,16 @@ export function PhotoImport({ userId, onClose, onImported }: Props) {
       }
 
       setDetail(`Reading ${sidecars.length.toLocaleString()} photos…`);
-      const points = await collectPhotoPoints(sidecars, (read, total, found) => {
-        setDetail(
-          `Read ${read.toLocaleString()} / ${total.toLocaleString()} photos — ${found.toLocaleString()} with location…`,
-        );
-      });
+      const { points, records } = await collectPhotoPoints(
+        sidecars,
+        (read, total, found) => {
+          setDetail(
+            `Read ${read.toLocaleString()} / ${total.toLocaleString()} photos — ${found.toLocaleString()} with location…`,
+          );
+        },
+        media,
+      );
+      setReport({ summary: summarize(records), records });
 
       if (points.length === 0) {
         throw new Error("Found photo metadata, but none of it had GPS coordinates.");
@@ -132,6 +149,7 @@ export function PhotoImport({ userId, onClose, onImported }: Props) {
           </>
         )}
         {status === "error" && <div className="msg err" style={{ marginTop: 14 }}>{error}</div>}
+        {report && status !== "working" && <ImportReport {...report} />}
 
         <details style={{ marginTop: 18 }}>
           <summary className="hint" style={{ cursor: "pointer" }}>How do I get my photos' locations?</summary>
@@ -152,6 +170,65 @@ export function PhotoImport({ userId, onClose, onImported }: Props) {
           </div>
         </details>
       </div>
+    </div>
+  );
+}
+
+function pct(n: number, d: number): string {
+  return d > 0 ? ` (${Math.round((n / d) * 100)}%)` : "";
+}
+
+/** What happened to every file in the batch, so a low yield can be explained. */
+function ImportReport({ summary: s, records }: { summary: PhotoSummary; records: PhotoRecord[] }) {
+  function download() {
+    const blob = new Blob([recordsToCsv(records)], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "photo-import-report.csv";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  const m = s.missingByKind;
+  const row = (label: string, value: string, indent = false) => (
+    <tr>
+      <td style={{ paddingLeft: indent ? 14 : 0, paddingRight: 12 }}>{label}</td>
+      <td style={{ textAlign: "right", color: "var(--bone)" }}>{value}</td>
+    </tr>
+  );
+  return (
+    <div className="hint" style={{ marginTop: 14 }}>
+      <b style={{ color: "var(--bone)" }}>Import report</b>
+      <table style={{ width: "100%", marginTop: 6, borderCollapse: "collapse" }}>
+        <tbody>
+          {row("Photos and videos", s.photos.toLocaleString())}
+          {row("with a location", s.located.toLocaleString() + pct(s.located, s.photos), true)}
+          {row("without a location", s.noLocation.toLocaleString() + pct(s.noLocation, s.photos), true)}
+          {m.photo > 0 && row("· photos", m.photo.toLocaleString(), true)}
+          {m.screenshot > 0 && row("· screenshots", m.screenshot.toLocaleString(), true)}
+          {m.video > 0 && row("· videos", m.video.toLocaleString(), true)}
+          {m.other > 0 && row("· other", m.other.toLocaleString(), true)}
+          {s.inspected > 0 &&
+            row("GPS found inside the photo file", `${s.gpsOnlyInFile.toLocaleString()} of ${s.inspected.toLocaleString()} checked`, true)}
+          {s.notPhoto > 0 && row("Other .json files skipped", s.notPhoto.toLocaleString())}
+          {s.unreadable > 0 && row("Unreadable files", s.unreadable.toLocaleString())}
+        </tbody>
+      </table>
+      {s.gpsOnlyInFile > 0 && (
+        <div style={{ marginTop: 6 }}>
+          Some photos have GPS in the file that Takeout left out of its metadata. Those aren't on
+          your map yet.
+        </div>
+      )}
+      {s.noLocation > 0 && s.inspected === 0 && (
+        <div style={{ marginTop: 6 }}>
+          Photo files weren't checked. Choose the whole folder (not just the .json files) to see
+          whether they carry GPS themselves.
+        </div>
+      )}
+      <button className="btn block" style={{ marginTop: 10 }} onClick={download}>
+        Download per-file report (CSV)
+      </button>
     </div>
   );
 }
