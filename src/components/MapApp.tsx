@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import maplibregl, { type Map as MlMap } from "maplibre-gl";
+import { type Map as MlMap } from "maplibre-gl";
 import { getHexagonAreaAvg } from "h3-js";
 import { MapView } from "../map/MapView";
 import { FogLayer } from "../map/FogLayer";
@@ -45,7 +45,6 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
   const fogRef = useRef<FogLayer | null>(null);
   const labelsRef = useRef<LabelLayer | null>(null);
   const poisRef = useRef<PoiLayer | null>(null);
-  const fittedRef = useRef(false);
   const saveTimer = useRef<number>();
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -96,24 +95,10 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
       poisRef.current?.refresh();
     });
 
-    if (!fittedRef.current && (displayCells.length > 0 || pins.length > 0)) {
-      fittedRef.current = true;
-      // Fit to the MAIN cluster, not every cell: photo imports scatter a few
-      // cells across other continents, which would otherwise force a whole-globe
-      // view. Center on the median point and keep only what's reasonably near it.
-      const lngs = [...displayCells.map((c) => c.lng), ...pins.map((p) => p.lng)];
-      const lats = [...displayCells.map((c) => c.lat), ...pins.map((p) => p.lat)];
-      const med = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
-      const mLng = med(lngs), mLat = med(lats);
-      const b = new maplibregl.LngLatBounds();
-      const add = (lng: number, lat: number) => {
-        if (Math.abs(lng - mLng) <= 40 && Math.abs(lat - mLat) <= 28) b.extend([lng, lat]);
-      };
-      for (const c of displayCells) add(c.lng, c.lat);
-      for (const p of pins) add(p.lng, p.lat);
-      if (b.isEmpty()) b.extend([mLng, mLat]);
-      map.fitBounds(b, { padding: 80, maxZoom: 9, duration: 0 });
-    }
+    // No auto-fit: the map stays on its default Europe view instead of flying to
+    // an auto-computed centre. With explored cells scattered across continents
+    // (photo imports), any whole-data fit lands between clusters and "redirects"
+    // somewhere unexpected right after load. Use the Atlas to jump to a place.
   }, [displayCells, pins, loaded]);
 
   useEffect(() => {
