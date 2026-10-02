@@ -37,19 +37,26 @@ const SRC_URL: Record<IconName, string> = {
 // range bigger than a castle, a castle bigger than a house, forest conifers
 // bigger than cottage-sized park oaks.
 const BASE_M: Record<IconName, number> = {
-  castle: 230, church: 230, monument: 175, obelisk: 175, ruins: 175, lighthouse: 200,
-  village: 195, hamlet: 150, house: 135, house2: 135, oak: 135, pines: 205, fir: 175, mountains: 320, peak: 220,
+  castle: 270, church: 270, monument: 205, obelisk: 205, ruins: 205, lighthouse: 235,
+  village: 230, hamlet: 180, house: 155, house2: 155, oak: 155, pines: 240, fir: 205, mountains: 380, peak: 260,
 };
-const MIN_PX = 5;   // "very very small" when it first appears
-const MAX_PX = 64;  // never grows beyond this, however far you zoom in
+const MAX_PX = 74;  // never grows beyond this, however far you zoom in
 
 const FLIPPABLE = new Set<IconName>(["house", "house2", "village", "hamlet", "oak", "pines", "fir", "mountains", "peak"]);
 
-const Z_ON = 11;            // icons begin to appear (tiny) here
+// Nature has map data early so it can start sooner; landmark POIs only exist in
+// the tiles from ~zoom 12, so that's where they can first appear. Each icon then
+// ramps up from nothing over RAMP zoom levels, so it grows in from a tiny speck
+// rather than popping in at full size.
+const NATURE_Z_ON = 11;
+const LANDMARK_Z_ON = 12;
+const RAMP = 1.6;
 const MIN_ELE = 700;        // metres — excludes city hills (Montmartre ~130m)
 const MAX_ITEMS = 650;      // DOM items kept before evicting the farthest off-screen
 const MARGIN_FRAC = 0.6;    // build icons this far beyond the viewport so they're
-                            // already present (and faded in) before scrolling in
+                            // already present before scrolling in
+
+const smoothstep = (t: number) => t * t * (3 - 2 * t);
 // fixed geographic grids (degrees) → stable selection, zoom-independent
 const LANDMARK_CELL = 0.03; // ~3km: one landmark per cell
 const PEAK_CELL = 0.11;     // ~12km: one peak/range per cell
@@ -86,8 +93,8 @@ function settlement(cls: string, lng: number, lat: number): { icon: IconName; sc
   return null;
 }
 
-interface Pick { key: string; icon: IconName; lng: number; lat: number; rank: number; scale: number; flip: boolean; }
-interface Item { el: HTMLDivElement; img: HTMLImageElement; icon: IconName; scale: number; flip: boolean; lng: number; lat: number; }
+interface Pick { key: string; icon: IconName; lng: number; lat: number; rank: number; scale: number; flip: boolean; z0: number; }
+interface Item { el: HTMLDivElement; img: HTMLImageElement; icon: IconName; scale: number; flip: boolean; lng: number; lat: number; z0: number; }
 
 function geomBBox(g: GeoJSON.Geometry) {
   let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
@@ -114,9 +121,17 @@ export class PoiLayer {
   private moveRaf = 0;
   private rebuildTimer = 0;
 
+  private lastZoomRebuild = 0;
   private onMove = () => {
     if (this.moveRaf) return;
     this.moveRaf = requestAnimationFrame(() => { this.moveRaf = 0; this.reposition(); });
+  };
+  // During a zoom gesture, create icons as soon as a cell qualifies (throttled)
+  // so they're born tiny and grow in, instead of all appearing at zoom-end.
+  private onZoom = () => {
+    const now = Date.now();
+    if (now - this.lastZoomRebuild > 110) { this.lastZoomRebuild = now; this.rebuild(); }
+    else this.onMove();
   };
   private onSettle = () => this.rebuild();
   private onSourceData = () => {
@@ -131,6 +146,7 @@ export class PoiLayer {
     this.root.className = "mapicons";
     map.getCanvasContainer().appendChild(this.root);
     map.on("move", this.onMove);
+    map.on("zoom", this.onZoom);
     map.on("moveend", this.onSettle);
     map.on("zoomend", this.onSettle);
     map.on("sourcedata", this.onSourceData);
@@ -143,6 +159,7 @@ export class PoiLayer {
     cancelAnimationFrame(this.moveRaf);
     clearTimeout(this.rebuildTimer);
     this.map.off("move", this.onMove);
+    this.map.off("zoom", this.onZoom);
     this.map.off("moveend", this.onSettle);
     this.map.off("zoomend", this.onSettle);
     this.map.off("sourcedata", this.onSourceData);
@@ -173,11 +190,12 @@ export class PoiLayer {
   }
 
   // Pixel height for a real-world height (metres) at a location — pins size to
-  // the map so icons scale with zoom, clamped small→capped.
-  private iconPx(icon: IconName, lng: number, lat: number, scale: number): number {
+  // the map so icons scale with zoom, capped at the top (the grow-in ramp is
+  // applied by the caller).
+  private iconPxRaw(icon: IconName, lng: number, lat: number, scale: number): number {
     const p1 = this.map.project([lng, lat]);
     const p2 = this.map.project([lng, lat + (BASE_M[icon] * scale) / 111320]);
-    return clamp(Math.abs(p1.y - p2.y), MIN_PX, MAX_PX);
+    return Math.min(Math.abs(p1.y - p2.y), MAX_PX);
   }
 
   // ---- candidate maps (keyed by geo cell) from the current tiles ----
@@ -273,7 +291,7 @@ export class PoiLayer {
     const c = best.get(`${gx}_${gy}`);
     if (!c) return [];
     const key = `L${gx}_${gy}`;
-    return [{ key, icon: c.icon, lng: c.lng, lat: c.lat, rank: c.rank, scale: c.scale * vary(c.lng, c.lat), flip: rand(c.lat * 13, c.lng * 13) > 0.5 }];
+    return [{ key, icon: c.icon, lng: c.lng, lat: c.lat, rank: c.rank, scale: c.scale * vary(c.lng, c.lat), flip: rand(c.lat * 13, c.lng * 13) > 0.5, z0: LANDMARK_Z_ON }];
   }
 
   private makePeak(groups: ReturnType<PoiLayer["peakCandidates"]>, gx: number, gy: number): Pick[] {
@@ -281,10 +299,10 @@ export class PoiLayer {
     if (!g) return [];
     if (g.n >= 3) {
       const lng = (gx + 0.5) * PEAK_CELL, lat = (gy + 0.5) * PEAK_CELL;
-      return [{ key: `K${gx}_${gy}`, icon: "mountains", lng, lat, rank: 5, scale: vary(lng, lat), flip: rand(gx * 17, gy * 17) > 0.5 }];
+      return [{ key: `K${gx}_${gy}`, icon: "mountains", lng, lat, rank: 5, scale: vary(lng, lat), flip: rand(gx * 17, gy * 17) > 0.5, z0: NATURE_Z_ON }];
     }
     const { lng, lat } = g.top;
-    return [{ key: `K${gx}_${gy}`, icon: "peak", lng, lat, rank: 8, scale: vary(lng, lat), flip: rand(lat * 31, lng * 31) > 0.5 }];
+    return [{ key: `K${gx}_${gy}`, icon: "peak", lng, lat, rank: 8, scale: vary(lng, lat), flip: rand(lat * 31, lng * 31) > 0.5, z0: NATURE_Z_ON }];
   }
 
   private makeForest(best: ReturnType<PoiLayer["forestCandidates"]>, gx: number, gy: number): Pick[] {
@@ -299,7 +317,7 @@ export class PoiLayer {
       // never mix broadleaf oaks with conifers in one stand: woods are conifer,
       // parks are oak.
       const icon: IconName = c.wood ? (rand(i + gx, gy - i) < 0.5 ? "pines" : "fir") : "oak";
-      out.push({ key: `F${gx}_${gy}:${i}`, icon, lng, lat, rank: 30, scale: vary(lng + i, lat), flip: rand(lat, lng) > 0.5 });
+      out.push({ key: `F${gx}_${gy}:${i}`, icon, lng, lat, rank: 30, scale: vary(lng + i, lat), flip: rand(lat, lng) > 0.5, z0: NATURE_Z_ON });
     }
     return out;
   }
@@ -308,18 +326,22 @@ export class PoiLayer {
     const src = this.vectorSource();
     if (!src) return;
 
+    const z = this.map.getZoom();
     let picks: Pick[] = [];
-    if (this.map.getZoom() >= Z_ON) {
-      try {
-        const land = this.landmarkCandidates(src);
+    try {
+      if (z >= NATURE_Z_ON) {
         const peaks = this.peakCandidates(src);
         const forest = this.forestCandidates(src);
-        picks = this.decideLayer("L", LANDMARK_CELL, (gx, gy) => this.makeLandmark(land, gx, gy))
+        picks = picks
           .concat(this.decideLayer("K", PEAK_CELL, (gx, gy) => this.makePeak(peaks, gx, gy)))
           .concat(this.decideLayer("F", FOREST_CELL, (gx, gy) => this.makeForest(forest, gx, gy)));
-      } catch {
-        picks = [];
       }
+      if (z >= LANDMARK_Z_ON) {
+        const land = this.landmarkCandidates(src);
+        picks = picks.concat(this.decideLayer("L", LANDMARK_CELL, (gx, gy) => this.makeLandmark(land, gx, gy)));
+      }
+    } catch {
+      picks = [];
     }
     // Create any genuinely new icons (off-screen, so their fade-in isn't seen),
     // but NEVER remove existing ones while navigating — once an icon is placed
@@ -334,7 +356,7 @@ export class PoiLayer {
       img.decoding = "async";
       el.appendChild(img);
       this.root.appendChild(el);
-      this.items.set(p.key, { el, img, icon: p.icon, scale: p.scale, flip: p.flip && FLIPPABLE.has(p.icon), lng: p.lng, lat: p.lat });
+      this.items.set(p.key, { el, img, icon: p.icon, scale: p.scale, flip: p.flip && FLIPPABLE.has(p.icon), lng: p.lng, lat: p.lat, z0: p.z0 });
     }
     this.evictFarthest();
     this.reposition();
@@ -362,17 +384,20 @@ export class PoiLayer {
   private reposition() {
     const c = this.map.getCanvas();
     const W = c.clientWidth, H = c.clientHeight;
-    const off = this.map.getZoom() < Z_ON; // below the threshold nothing shows
+    const z = this.map.getZoom();
     for (const it of this.items.values()) {
-      if (off) { it.el.style.display = "none"; continue; }
+      // grow-in ramp: 0 at the icon's start zoom, full RAMP levels later
+      const ramp = smoothstep(clamp((z - it.z0) / RAMP, 0, 1));
+      const h = this.iconPxRaw(it.icon, it.lng, it.lat, it.scale) * ramp;
       const pt = this.map.project([it.lng, it.lat]);
-      // cull well off-screen only (purely a draw optimisation — the item is kept)
-      if (pt.x < -200 || pt.x > W + 200 || pt.y < -240 || pt.y > H + 120) {
+      // hide while sub-pixel small, or well off-screen (both just skip drawing —
+      // the item is kept either way, so nothing blinks)
+      if (h < 1.5 || pt.x < -200 || pt.x > W + 200 || pt.y < -240 || pt.y > H + 120) {
         it.el.style.display = "none";
         continue;
       }
       it.el.style.display = "";
-      it.img.style.height = `${Math.round(this.iconPx(it.icon, it.lng, it.lat, it.scale))}px`;
+      it.img.style.height = `${h.toFixed(1)}px`;
       it.el.style.zIndex = String(Math.round((90 - it.lat) * 40));
       it.el.style.transform = `translate(${pt.x}px, ${pt.y}px) translate(-50%, -100%)${it.flip ? " scaleX(-1)" : ""}`;
     }
