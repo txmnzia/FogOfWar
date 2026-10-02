@@ -306,3 +306,100 @@ export async function photosToCellIndexes(
   onProgress?.(total, total);
   return out;
 }
+
+// ---- Plain location files (iCloud via a Mac, exiftool, …) -----------------
+// iCloud exports have no sidecars, and the photos themselves can be 100+ GB.
+// On a Mac, osxphotos reads every location straight from the Photos database
+// (no originals downloaded), so we accept any CSV/JSON listing coordinates.
+
+const LAT_KEYS = ["latitude", "lat", "gpslatitude"];
+const LNG_KEYS = ["longitude", "lng", "lon", "long", "gpslongitude"];
+
+function num(v: unknown): number | undefined {
+  if (typeof v === "number") return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v.trim());
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
+}
+
+function pick(o: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const k of Object.keys(o)) if (keys.includes(k.toLowerCase())) return num(o[k]);
+  return undefined;
+}
+
+function coordFromObject(o: unknown): [number, number] | null {
+  if (!o || typeof o !== "object") return null;
+  const r = o as Record<string, unknown>;
+  let lat = pick(r, LAT_KEYS);
+  let lng = pick(r, LNG_KEYS);
+  // osxphotos also writes location: [lat, lng].
+  if ((lat === undefined || lng === undefined) && Array.isArray(r.location)) {
+    lat = num(r.location[0]);
+    lng = num(r.location[1]);
+  }
+  return coordFrom({ latitude: lat, longitude: lng });
+}
+
+/** Minimal RFC 4180 CSV reader: quoted fields may hold delimiters, quotes, newlines. */
+function parseCsv(text: string, delim: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else quoted = false;
+      } else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === delim) { row.push(field); field = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(field); rows.push(row); row = []; field = "";
+    } else field += c;
+  }
+  if (field !== "" || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+/**
+ * Read coordinates from a CSV or JSON location list: osxphotos output, an
+ * exiftool `-n -csv` dump, or anything with latitude/longitude (lat/lng)
+ * columns or fields. Rows without a usable fix are counted but skipped.
+ */
+export function pointsFromLocationFile(text: string): { points: Array<[number, number]>; rows: number } {
+  const t = text.replace(/^﻿/, "").trim();
+  const points: Array<[number, number]> = [];
+
+  if (t.startsWith("[") || t.startsWith("{")) {
+    const json: unknown = JSON.parse(t);
+    const items = Array.isArray(json)
+      ? json
+      : Object.values(json as Record<string, unknown>).find(Array.isArray) ?? [json];
+    for (const it of items) {
+      const p = coordFromObject(it);
+      if (p) points.push(p);
+    }
+    return { points, rows: items.length };
+  }
+
+  const first = t.slice(0, t.search(/\r?\n|$/));
+  const delim = [",", ";", "\t"].sort((a, b) => first.split(b).length - first.split(a).length)[0];
+  const [header, ...body] = parseCsv(t, delim);
+  const cols = (header ?? []).map((h) => h.trim().toLowerCase());
+  const li = cols.findIndex((c) => LAT_KEYS.includes(c));
+  const gi = cols.findIndex((c) => LNG_KEYS.includes(c));
+  if (li < 0 || gi < 0) {
+    throw new Error("Couldn't find latitude/longitude columns in that file.");
+  }
+  const rows = body.filter((r) => r.some((v) => v.trim() !== ""));
+  for (const r of rows) {
+    const p = coordFrom({ latitude: num(r[li]), longitude: num(r[gi]) });
+    if (p) points.push(p);
+  }
+  return { points, rows: rows.length };
+}
