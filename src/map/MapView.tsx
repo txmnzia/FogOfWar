@@ -46,10 +46,16 @@ export function MapView({ onReady, onClick }: Props) {
       map.on("click", (e) => onClickRef.current?.({ lng: e.lngLat.lng, lat: e.lngLat.lat }));
 
       // Don't let the user zoom out past the point where the world stops filling
-      // the viewport — beyond that the map shows empty margins the fog can't cover.
+      // the viewport — beyond that it wraps and the fog shows a seam / empty
+      // margins. Must satisfy BOTH dimensions: on a wide screen the binding
+      // constraint is width, or the world is narrower than the viewport and a
+      // vertical seam appears at the world edge.
       const applyMinZoom = () => {
-        const h = map!.getContainer().clientHeight;
-        if (h > 0) map!.setMinZoom(Math.max(0, Math.log2(h / 512) + 0.05));
+        const el = map!.getContainer();
+        const w = el.clientWidth, h = el.clientHeight;
+        if (w > 0 && h > 0) {
+          map!.setMinZoom(Math.max(0, Math.log2(w / 512), Math.log2(h / 512)) + 0.05);
+        }
       };
       map.on("resize", applyMinZoom);
       map.on("load", () => {

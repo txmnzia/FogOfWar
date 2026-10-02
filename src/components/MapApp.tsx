@@ -98,10 +98,21 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
 
     if (!fittedRef.current && (displayCells.length > 0 || pins.length > 0)) {
       fittedRef.current = true;
+      // Fit to the MAIN cluster, not every cell: photo imports scatter a few
+      // cells across other continents, which would otherwise force a whole-globe
+      // view. Center on the median point and keep only what's reasonably near it.
+      const lngs = [...displayCells.map((c) => c.lng), ...pins.map((p) => p.lng)];
+      const lats = [...displayCells.map((c) => c.lat), ...pins.map((p) => p.lat)];
+      const med = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+      const mLng = med(lngs), mLat = med(lats);
       const b = new maplibregl.LngLatBounds();
-      for (const c of displayCells) b.extend([c.lng, c.lat]);
-      for (const p of pins) b.extend([p.lng, p.lat]);
-      if (!b.isEmpty()) map.fitBounds(b, { padding: 80, maxZoom: 9, duration: 0 });
+      const add = (lng: number, lat: number) => {
+        if (Math.abs(lng - mLng) <= 40 && Math.abs(lat - mLat) <= 28) b.extend([lng, lat]);
+      };
+      for (const c of displayCells) add(c.lng, c.lat);
+      for (const p of pins) add(p.lng, p.lat);
+      if (b.isEmpty()) b.extend([mLng, mLat]);
+      map.fitBounds(b, { padding: 80, maxZoom: 9, duration: 0 });
     }
   }, [displayCells, pins, loaded]);
 
