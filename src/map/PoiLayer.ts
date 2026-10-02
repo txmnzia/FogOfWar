@@ -31,19 +31,25 @@ const SRC_URL: Record<IconName, string> = {
   castle, church, monument, obelisk, ruins, lighthouse, village, hamlet, house, house2, oak, pines, fir, mountains, peak,
 };
 
-// Fixed on-screen height (px) per type — relative sizes (a range dwarfs a
-// cottage; houses stay under castles/churches; park oaks are cottage-sized
-// while forest conifers are bigger); multiplied by a small per-icon variation.
-const BASE_PX: Record<IconName, number> = {
-  castle: 52, church: 52, monument: 42, obelisk: 40, ruins: 40, lighthouse: 48,
-  village: 42, hamlet: 34, house: 30, house2: 30, oak: 30, pines: 48, fir: 42, mountains: 58, peak: 48,
+// Real-world footprint (metres) per type. Icons are drawn at this size
+// projected to the screen, so they're pinned to the map: tiny when it first
+// turns on, growing with zoom, then held at a max cap. Relative values keep a
+// range bigger than a castle, a castle bigger than a house, forest conifers
+// bigger than cottage-sized park oaks.
+const BASE_M: Record<IconName, number> = {
+  castle: 230, church: 230, monument: 175, obelisk: 175, ruins: 175, lighthouse: 200,
+  village: 195, hamlet: 150, house: 135, house2: 135, oak: 135, pines: 205, fir: 175, mountains: 320, peak: 220,
 };
+const MIN_PX = 5;   // "very very small" when it first appears
+const MAX_PX = 64;  // never grows beyond this, however far you zoom in
 
 const FLIPPABLE = new Set<IconName>(["house", "house2", "village", "hamlet", "oak", "pines", "fir", "mountains", "peak"]);
 
-const Z_ON = 12;            // everything appears here and stays put
+const Z_ON = 11;            // icons begin to appear (tiny) here
 const MIN_ELE = 700;        // metres — excludes city hills (Montmartre ~130m)
-const MAX_TOTAL = 60;       // overall clutter cap
+const MAX_ITEMS = 650;      // DOM items kept before evicting the farthest off-screen
+const MARGIN_FRAC = 0.6;    // build icons this far beyond the viewport so they're
+                            // already present (and faded in) before scrolling in
 // fixed geographic grids (degrees) → stable selection, zoom-independent
 const LANDMARK_CELL = 0.03; // ~3km: one landmark per cell
 const PEAK_CELL = 0.11;     // ~12km: one peak/range per cell
@@ -166,6 +172,14 @@ export class PoiLayer {
     return !this.fog || this.fog.isRevealed(lng, lat);
   }
 
+  // Pixel height for a real-world height (metres) at a location — pins size to
+  // the map so icons scale with zoom, clamped small→capped.
+  private iconPx(icon: IconName, lng: number, lat: number, scale: number): number {
+    const p1 = this.map.project([lng, lat]);
+    const p2 = this.map.project([lng, lat + (BASE_M[icon] * scale) / 111320]);
+    return clamp(Math.abs(p1.y - p2.y), MIN_PX, MAX_PX);
+  }
+
   // ---- candidate maps (keyed by geo cell) from the current tiles ----
   private landmarkCandidates(src: string): Map<string, { icon: IconName; lng: number; lat: number; rank: number; scale: number }> {
     const best = new Map<string, { icon: IconName; lng: number; lat: number; rank: number; scale: number }>();
@@ -235,8 +249,10 @@ export class PoiLayer {
   // revealed), then reused — so zooming in never changes the set.
   private decideLayer(prefix: string, cell: number, make: (gx: number, gy: number) => Pick[]): Pick[] {
     const b = this.map.getBounds();
-    const gx0 = Math.floor(b.getWest() / cell) - 1, gx1 = Math.floor(b.getEast() / cell) + 1;
-    const gy0 = Math.floor(b.getSouth() / cell) - 1, gy1 = Math.floor(b.getNorth() / cell) + 1;
+    const padLng = (b.getEast() - b.getWest()) * MARGIN_FRAC;
+    const padLat = (b.getNorth() - b.getSouth()) * MARGIN_FRAC;
+    const gx0 = Math.floor((b.getWest() - padLng) / cell) - 1, gx1 = Math.floor((b.getEast() + padLng) / cell) + 1;
+    const gy0 = Math.floor((b.getSouth() - padLat) / cell) - 1, gy1 = Math.floor((b.getNorth() + padLat) / cell) + 1;
     const out: Pick[] = [];
     for (let gx = gx0; gx <= gx1; gx++) {
       for (let gy = gy0; gy <= gy1; gy++) {
@@ -305,18 +321,11 @@ export class PoiLayer {
         picks = [];
       }
     }
-    if (picks.length > MAX_TOTAL) {
-      picks.sort((a, b) => a.rank - b.rank);
-      picks = picks.slice(0, MAX_TOTAL);
-    }
-
-    const desired = new Map(picks.map((p) => [p.key, p]));
-    for (const [k, it] of this.items) {
-      if (!desired.has(k)) { it.el.remove(); this.items.delete(k); }
-    }
-    for (const [k, p] of desired) {
-      const existing = this.items.get(k);
-      if (existing) { existing.lng = p.lng; existing.lat = p.lat; existing.scale = p.scale; continue; }
+    // Create any genuinely new icons (off-screen, so their fade-in isn't seen),
+    // but NEVER remove existing ones while navigating — once an icon is placed
+    // it stays and simply scrolls off-screen. That's what keeps it blink-free.
+    for (const p of picks) {
+      if (this.items.has(p.key)) continue;
       const el = document.createElement("div");
       el.className = "mapicon fade-in";
       const img = document.createElement("img");
@@ -325,9 +334,29 @@ export class PoiLayer {
       img.decoding = "async";
       el.appendChild(img);
       this.root.appendChild(el);
-      this.items.set(k, { el, img, icon: p.icon, scale: p.scale, flip: p.flip && FLIPPABLE.has(p.icon), lng: p.lng, lat: p.lat });
+      this.items.set(p.key, { el, img, icon: p.icon, scale: p.scale, flip: p.flip && FLIPPABLE.has(p.icon), lng: p.lng, lat: p.lat });
     }
+    this.evictFarthest();
     this.reposition();
+  }
+
+  // Drop the farthest-off-screen items if we're holding too many, so memory
+  // stays bounded. Only ever removes icons well outside the view, never on-screen
+  // ones, so it can't cause a visible blink.
+  private evictFarthest() {
+    const over = this.items.size - MAX_ITEMS;
+    if (over <= 0) return;
+    const c = this.map.getCanvas();
+    const cx = c.clientWidth / 2, cy = c.clientHeight / 2;
+    const scored = [...this.items.entries()].map(([k, it]) => {
+      const pt = this.map.project([it.lng, it.lat]);
+      return { k, it, d: Math.hypot(pt.x - cx, pt.y - cy) };
+    });
+    scored.sort((a, b) => b.d - a.d);
+    for (let i = 0; i < over; i++) {
+      scored[i].it.el.remove();
+      this.items.delete(scored[i].k);
+    }
   }
 
   private reposition() {
@@ -337,12 +366,13 @@ export class PoiLayer {
     for (const it of this.items.values()) {
       if (off) { it.el.style.display = "none"; continue; }
       const pt = this.map.project([it.lng, it.lat]);
-      if (pt.x < -60 || pt.x > W + 60 || pt.y < -90 || pt.y > H + 40) {
+      // cull well off-screen only (purely a draw optimisation — the item is kept)
+      if (pt.x < -200 || pt.x > W + 200 || pt.y < -240 || pt.y > H + 120) {
         it.el.style.display = "none";
         continue;
       }
       it.el.style.display = "";
-      it.img.style.height = `${Math.round(clamp(BASE_PX[it.icon] * it.scale, 14, 90))}px`;
+      it.img.style.height = `${Math.round(this.iconPx(it.icon, it.lng, it.lat, it.scale))}px`;
       it.el.style.zIndex = String(Math.round((90 - it.lat) * 40));
       it.el.style.transform = `translate(${pt.x}px, ${pt.y}px) translate(-50%, -100%)${it.flip ? " scaleX(-1)" : ""}`;
     }
