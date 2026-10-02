@@ -9,11 +9,8 @@ import ruins from "../assets/poi/ruins.png";
 import lighthouse from "../assets/poi/lighthouse.png";
 import village from "../assets/poi/village.png";
 import hamlet from "../assets/poi/hamlet.png";
-import house from "../assets/poi/house.png";
-import house2 from "../assets/poi/house2.png";
 import oak from "../assets/poi/oak.png";
 import pines from "../assets/poi/pines.png";
-import fir from "../assets/poi/fir.png";
 import mountains from "../assets/poi/mountains.png";
 import peak from "../assets/poi/peak.png";
 
@@ -25,10 +22,10 @@ import peak from "../assets/poi/peak.png";
 
 type IconName =
   | "castle" | "church" | "monument" | "obelisk" | "ruins" | "lighthouse"
-  | "village" | "hamlet" | "house" | "house2" | "oak" | "pines" | "fir" | "mountains" | "peak";
+  | "village" | "hamlet" | "oak" | "pines" | "mountains" | "peak";
 
 const SRC_URL: Record<IconName, string> = {
-  castle, church, monument, obelisk, ruins, lighthouse, village, hamlet, house, house2, oak, pines, fir, mountains, peak,
+  castle, church, monument, obelisk, ruins, lighthouse, village, hamlet, oak, pines, mountains, peak,
 };
 
 // Real-world footprint (metres) per type. Icons are drawn at this size
@@ -38,11 +35,11 @@ const SRC_URL: Record<IconName, string> = {
 // bigger than cottage-sized park oaks.
 const BASE_M: Record<IconName, number> = {
   castle: 270, church: 270, monument: 205, obelisk: 205, ruins: 205, lighthouse: 235,
-  village: 230, hamlet: 180, house: 155, house2: 155, oak: 155, pines: 240, fir: 205, mountains: 380, peak: 260,
+  village: 230, hamlet: 185, oak: 160, pines: 240, mountains: 380, peak: 260,
 };
 const MAX_PX = 74;  // never grows beyond this, however far you zoom in
 
-const FLIPPABLE = new Set<IconName>(["house", "house2", "village", "hamlet", "oak", "pines", "fir", "mountains", "peak"]);
+const FLIPPABLE = new Set<IconName>(["village", "hamlet", "oak", "pines", "mountains", "peak"]);
 
 // Nature has map data early so it can start sooner; landmark POIs only exist in
 // the tiles from ~zoom 12, so that's where they can first appear. Each icon then
@@ -86,10 +83,10 @@ function landmarkIcon(f: MapGeoJSONFeature): IconName | null {
 
 function settlement(cls: string, lng: number, lat: number): { icon: IconName; scale: number } | null {
   const r = rand(lng * 997, lat * 997);
-  if (cls === "town") return { icon: "village", scale: 1.05 };
-  if (cls === "village") return r < 0.6 ? { icon: "village", scale: 0.92 } : { icon: r < 0.8 ? "house" : "house2", scale: 1.12 };
+  if (cls === "town") return { icon: "village", scale: 1.08 };
+  if (cls === "village") return r < 0.5 ? { icon: "village", scale: 0.95 } : { icon: "hamlet", scale: 1.0 };
   if (["hamlet", "isolated_dwelling", "suburb", "neighbourhood", "quarter"].includes(cls))
-    return { icon: r < 0.5 ? "house" : "house2", scale: 0.95 };
+    return { icon: "hamlet", scale: 0.92 };
   return null;
 }
 
@@ -314,9 +311,9 @@ export class PoiLayer {
     for (let i = 0; i < n; i++) {
       const lng = cx + (rand(gx * 7 + i, gy * 3) - 0.5) * FOREST_CELL * 0.6;
       const lat = cy + (rand(gy * 7 + i * 5, gx * 3) - 0.5) * FOREST_CELL * 0.6;
-      // never mix broadleaf oaks with conifers in one stand: woods are conifer,
-      // parks are oak.
-      const icon: IconName = c.wood ? (rand(i + gx, gy - i) < 0.5 ? "pines" : "fir") : "oak";
+      // never mix broadleaf oaks with conifers in one stand: woods are pine
+      // stands, parks are oaks.
+      const icon: IconName = c.wood ? "pines" : "oak";
       out.push({ key: `F${gx}_${gy}:${i}`, icon, lng, lat, rank: 30, scale: vary(lng + i, lat), flip: rand(lat, lng) > 0.5, z0: NATURE_Z_ON });
     }
     return out;
