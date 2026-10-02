@@ -3,6 +3,7 @@ import {
   collectPhotoPoints,
   isSidecar,
   photosToCellIndexes,
+  pointsFromLocationFile,
   recordsToCsv,
   summarize,
   type PhotoRecord,
@@ -63,35 +64,58 @@ export function PhotoImport({ userId, onClose, onImported }: Props) {
       if (points.length === 0) {
         throw new Error("Found photo metadata, but none of it had GPS coordinates.");
       }
+      await reveal(points);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setStatus("error");
+    }
+  }
 
-      const cells = await photosToCellIndexes(points, (done, total) => {
-        setDetail(`Mapping ${done.toLocaleString()} / ${total.toLocaleString()} located photos…`);
+  /** Turn located photos into explored cells: show them at once, then save. */
+  async function reveal(points: Array<[number, number]>) {
+    const cells = await photosToCellIndexes(points, (done, total) => {
+      setDetail(`Mapping ${done.toLocaleString()} / ${total.toLocaleString()} located photos…`);
+    });
+    const idxs = Array.from(cells);
+
+    // Reveal on the map right away — independent of the network save below, so
+    // even a slow or flaky save still shows the result immediately.
+    onImported(idxs);
+
+    setDetail(`Saving ${cells.size.toLocaleString()} explored areas…`);
+    try {
+      await addCells(userId, cells, "photos", (done, total) => {
+        setDetail(`Saving ${done.toLocaleString()} / ${total.toLocaleString()} explored areas…`);
       });
-      const idxs = Array.from(cells);
+      setDetail(
+        `Imported ${points.length.toLocaleString()} located photos → ${cells.size.toLocaleString()} explored areas.`,
+      );
+      setStatus("done");
+    } catch (saveErr) {
+      // Cells are already on the map; upserts are idempotent, so a re-run
+      // resumes safely and skips whatever landed. Don't lose the whole import.
+      setError(
+        `Shown on your map, but saving was interrupted (${
+          saveErr instanceof Error ? saveErr.message : String(saveErr)
+        }). Run the import again to finish saving — it resumes where it left off.`,
+      );
+      setStatus("error");
+    }
+  }
 
-      // Reveal on the map right away — independent of the network save below, so
-      // even a slow or flaky save still shows the result immediately.
-      onImported(idxs);
-
-      setDetail(`Saving ${cells.size.toLocaleString()} explored areas…`);
-      try {
-        await addCells(userId, cells, "photos", (done, total) => {
-          setDetail(`Saving ${done.toLocaleString()} / ${total.toLocaleString()} explored areas…`);
-        });
-        setDetail(
-          `Imported ${points.length.toLocaleString()} located photos → ${cells.size.toLocaleString()} explored areas.`,
-        );
-        setStatus("done");
-      } catch (saveErr) {
-        // Cells are already on the map; upserts are idempotent, so a re-run
-        // resumes safely and skips whatever landed. Don't lose the whole import.
-        setError(
-          `Shown on your map, but saving was interrupted (${
-            saveErr instanceof Error ? saveErr.message : String(saveErr)
-          }). Run the import again to finish saving — it resumes where it left off.`,
-        );
-        setStatus("error");
+  async function handleLocationFile(files: FileList | null) {
+    const file = files?.[0];
+    if (!file) return;
+    setStatus("working");
+    setError("");
+    setReport(null);
+    setDetail(`Reading ${file.name}…`);
+    try {
+      const { points, rows } = pointsFromLocationFile(await file.text());
+      if (points.length === 0) {
+        throw new Error(`Read ${rows.toLocaleString()} rows, but none had usable coordinates.`);
       }
+      await reveal(points);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setStatus("error");
@@ -136,6 +160,17 @@ export function PhotoImport({ userId, onClose, onImported }: Props) {
           if your browser won’t let you choose a folder
         </label>
 
+        <label className="dropzone" style={{ marginTop: 10 }}>
+          <input
+            type="file"
+            accept=".csv,.json,.txt,text/csv,application/json"
+            style={{ display: "none" }}
+            onChange={(e) => handleLocationFile(e.target.files)}
+          />
+          <b style={{ color: "var(--brass-bright)" }}>iCloud: pick a location file</b><br />
+          a CSV/JSON with latitude and longitude, e.g. from osxphotos on a Mac
+        </label>
+
         {status === "working" && (
           <div className="msg ok" style={{ marginTop: 14 }}>
             {detail}
@@ -164,9 +199,16 @@ export function PhotoImport({ userId, onClose, onImported }: Props) {
             <i> Photos from YYYY</i> folders. If the whole export is slow to pick, import one year
             folder at a time — re-running is safe, it never double-counts.
             <br /><br />
-            <b style={{ color: "var(--bone)" }}>iCloud / local photos:</b> those exports don't include
-            the same sidecar files, so they aren't supported yet — read directly from the photos'
-            EXIF is a later step. For now, if your library is also in Google Photos, use Takeout.
+            <b style={{ color: "var(--bone)" }}>iCloud (on a Mac):</b> no need to download your
+            originals. With iCloud Photos synced in Photos.app, give Terminal Full Disk Access, run{" "}
+            <code>pipx install osxphotos</code>, quit Photos, then export every location to a CSV:
+            <pre style={{ whiteSpace: "pre-wrap", fontSize: 11, marginTop: 6 }}>{`~/.local/pipx/venvs/osxphotos/bin/python -c "import osxphotos,csv,sys
+w=csv.writer(sys.stdout); w.writerow(['lat','lng'])
+for p in osxphotos.PhotosDB().photos():
+    lat,lng=p.location
+    if lat is not None: w.writerow([lat,lng])" > ~/Desktop/icloud-locations.csv`}</pre>
+            Then pick <i>icloud-locations.csv</i> above. An <code>exiftool -n -csv</code> dump of a
+            photo folder works too.
           </div>
         </details>
       </div>
