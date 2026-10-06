@@ -18,9 +18,12 @@ import type { Cell, Pin } from "../lib/types";
 import {
   addPin,
   fetchAllCellIndexes,
+  fetchBackup,
   fetchPins,
   fetchSettings,
+  parseBackup,
   removePin,
+  restoreBackup,
   saveSettings,
   updatePinRadius,
 } from "../data/repo";
@@ -40,6 +43,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
   const [importOpen, setImportOpen] = useState(false);
   const [stravaOpen, setStravaOpen] = useState(false);
   const [photoOpen, setPhotoOpen] = useState(false);
+  const [busy, setBusy] = useState("");
 
   const mapRef = useRef<MlMap | null>(null);
   const fogRef = useRef<FogLayer | null>(null);
@@ -55,20 +59,23 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
   const displayCells = useMemo(() => (usingSample ? sampleCells() : cells), [usingSample, cells]);
   const litKm2 = Math.round((usingSample ? 0 : cells.length) * CELL_AREA_KM2);
 
+  async function loadAll() {
+    try {
+      const [s, indexes, p] = await Promise.all([fetchSettings(), fetchAllCellIndexes(), fetchPins()]);
+      setSettings(s);
+      setCells(indexes.map(cellFromIndex));
+      setPins(p);
+      setLoadError("");
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoaded(true);
+    }
+  }
+
   // Initial data load.
   useEffect(() => {
-    (async () => {
-      try {
-        const [s, indexes, p] = await Promise.all([fetchSettings(), fetchAllCellIndexes(), fetchPins()]);
-        setSettings(s);
-        setCells(indexes.map(cellFromIndex));
-        setPins(p);
-      } catch (e) {
-        setLoadError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setLoaded(true);
-      }
-    })();
+    loadAll();
   }, []);
 
   const onReady = useCallback((map: MlMap) => {
@@ -149,17 +156,49 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
     await removePin(id).catch(() => {});
   }
 
-  function exportCells() {
-    const ids = cells.map((c) => c.h3);
-    const blob = new Blob([JSON.stringify(ids)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "fogofwar-cells.json";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+  async function backup() {
+    if (busy) return;
+    try {
+      setBusy("Preparing backup…");
+      const b = await fetchBackup((n) => setBusy(`Preparing backup… ${n.toLocaleString()} cells`));
+      const blob = new Blob([JSON.stringify(b)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `fogofwar-backup-${b.exportedAt.slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setBusy("");
+      alert(`Backup saved: ${b.cells.length.toLocaleString()} cells, ${b.pins.length} places.`);
+    } catch (e) {
+      setBusy("");
+      alert(`Backup failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async function restore(file: File) {
+    if (busy) return;
+    try {
+      const b = parseBackup(JSON.parse(await file.text()));
+      const ok = confirm(
+        `Add ${b.cells.length.toLocaleString()} cells and ${b.pins.length} places to this account? ` +
+          "Nothing already on your map is changed or removed.",
+      );
+      if (!ok) return;
+      setMenuOpen(false);
+      setBusy("Restoring…");
+      const r = await restoreBackup(userId, b, (done, total) =>
+        setBusy(`Restoring… ${done.toLocaleString()} / ${total.toLocaleString()} cells`),
+      );
+      await loadAll();
+      setBusy("");
+      alert(`Restored ${r.cells.toLocaleString()} cells and ${r.pins} new places.`);
+    } catch (e) {
+      setBusy("");
+      alert(`Restore failed: ${e instanceof Error ? e.message : String(e)}. Safe to retry with the same file.`);
+    }
   }
 
   function onImported(indexes: string[]) {
@@ -203,7 +242,8 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
           onOpenImport={() => setImportOpen(true)}
           onOpenStrava={() => setStravaOpen(true)}
           onOpenPhotos={() => setPhotoOpen(true)}
-          onExport={exportCells}
+          onBackup={backup}
+          onRestore={restore}
           onSignOut={() => supabase?.auth.signOut()}
           onClose={() => setMenuOpen(false)}
         />
@@ -221,11 +261,16 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
         <PhotoImport userId={userId} onClose={() => setPhotoOpen(false)} onImported={onImported} />
       )}
 
-      {usingSample && (
+      {usingSample && !busy && (
         <div className="banner">
           <span>
             <span className="em">Sample journey shown.</span> Import your Timeline or add a place to begin your own map.
           </span>
+        </div>
+      )}
+      {busy && (
+        <div className="banner">
+          <span className="em">{busy}</span>
         </div>
       )}
       {loadError && (

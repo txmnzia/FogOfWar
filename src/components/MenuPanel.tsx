@@ -18,7 +18,8 @@ interface Props {
   onOpenImport: () => void;
   onOpenStrava: () => void;
   onOpenPhotos: () => void;
-  onExport: () => void;
+  onBackup: () => void;
+  onRestore: (file: File) => void;
   onSignOut: () => void;
   onClose: () => void;
 }
@@ -73,8 +74,29 @@ export function MenuPanel(p: Props) {
         <button className="btn block" onClick={p.onOpenImport}>Import Google Timeline</button>
         <button className="btn block" style={{ marginTop: 8 }} onClick={p.onOpenStrava}>Import Strava</button>
         <button className="btn block" style={{ marginTop: 8 }} onClick={p.onOpenPhotos}>Import photo locations</button>
-        <button className="btn ghost block" style={{ marginTop: 8 }} onClick={p.onExport}>Export explored cells</button>
         <p className="hint" style={{ marginTop: 8 }}>Reveal everywhere your location history, activities and photos have been.</p>
+      </div>
+
+      <div className="section">
+        <h3>Backup</h3>
+        <button className="btn ghost block" onClick={p.onBackup}>Download backup</button>
+        <label className="btn ghost block" style={{ marginTop: 8 }}>
+          Restore from backup
+          <input
+            type="file"
+            accept="application/json,.json"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = "";
+              if (f) p.onRestore(f);
+            }}
+          />
+        </label>
+        <p className="hint" style={{ marginTop: 8 }}>
+          Explored cells, places and fog settings in one file. Restoring adds to your map and never
+          removes anything.
+        </p>
       </div>
 
       <div className="section">
