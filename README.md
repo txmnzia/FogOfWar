@@ -53,9 +53,13 @@ which stores your data and syncs it between devices. Both Supabase values are
 
 2. **Supabase** — create a project at <https://supabase.com/dashboard>, then
    Settings → API. Put the Project URL in `VITE_SUPABASE_URL` and the `anon public`
-   key in `VITE_SUPABASE_ANON_KEY`. Finally, open the SQL editor and run
-   [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql) once to
-   create the tables (they're locked to your account via row-level security).
+   key in `VITE_SUPABASE_ANON_KEY`. Then open the SQL editor and run, in order,
+   [`0001_init.sql`](supabase/migrations/0001_init.sql) and
+   [`0002_fogofwar_schema.sql`](supabase/migrations/0002_fogofwar_schema.sql) to
+   create the tables in the `fogofwar` schema (they're locked to your account via
+   row-level security). Finally add `fogofwar` under Settings → Data API →
+   Exposed schemas. The Supabase project is shared by all txmnzia apps, one
+   schema per app.
 
 3. **Run**
    ```bash
