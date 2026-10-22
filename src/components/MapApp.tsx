@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { errorMessage } from "../lib/errors";
 import { type Map as MlMap } from "maplibre-gl";
 import { getHexagonAreaAvg } from "h3-js";
 import { MapView } from "../map/MapView";
@@ -67,7 +68,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
       setPins(p);
       setLoadError("");
     } catch (e) {
-      setLoadError(e instanceof Error ? e.message : String(e));
+      setLoadError(errorMessage(e));
     } finally {
       setLoaded(true);
     }
@@ -174,7 +175,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
       alert(`Backup saved: ${b.cells.length.toLocaleString()} cells, ${b.pins.length} places.`);
     } catch (e) {
       setBusy("");
-      alert(`Backup failed: ${e instanceof Error ? e.message : String(e)}`);
+      alert(`Backup failed: ${errorMessage(e)}`);
     }
   }
 
@@ -197,7 +198,7 @@ export function MapApp({ userId, email }: { userId: string; email: string }) {
       alert(`Restored ${r.cells.toLocaleString()} cells and ${r.pins} new places.`);
     } catch (e) {
       setBusy("");
-      alert(`Restore failed: ${e instanceof Error ? e.message : String(e)}. Safe to retry with the same file.`);
+      alert(`Restore failed: ${errorMessage(e)}. Safe to retry with the same file.`);
     }
   }
 

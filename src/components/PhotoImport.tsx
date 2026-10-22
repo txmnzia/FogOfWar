@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { errorMessage } from "../lib/errors";
 import {
   collectPhotoPoints,
   isSidecar,
@@ -66,7 +67,7 @@ export function PhotoImport({ userId, onClose, onImported }: Props) {
       }
       await reveal(points);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
       setStatus("error");
     }
   }
@@ -96,7 +97,7 @@ export function PhotoImport({ userId, onClose, onImported }: Props) {
       // resumes safely and skips whatever landed. Don't lose the whole import.
       setError(
         `Shown on your map, but saving was interrupted (${
-          saveErr instanceof Error ? saveErr.message : String(saveErr)
+          errorMessage(saveErr)
         }). Run the import again to finish saving — it resumes where it left off.`,
       );
       setStatus("error");
@@ -117,7 +118,7 @@ export function PhotoImport({ userId, onClose, onImported }: Props) {
       }
       await reveal(points);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
       setStatus("error");
     }
   }

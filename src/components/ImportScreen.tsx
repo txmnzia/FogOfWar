@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { errorMessage } from "../lib/errors";
 import { extractPointsFromFile } from "../lib/importTimeline";
 import { pointsToCellIndexes } from "../lib/h3";
 import { addCells } from "../data/repo";
@@ -36,7 +37,7 @@ export function ImportScreen({ userId, onClose, onImported }: Props) {
       setDetail(`Imported ${points.toLocaleString()} points → ${all.size.toLocaleString()} explored areas.`);
       setStatus("done");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
       setStatus("error");
     }
   }

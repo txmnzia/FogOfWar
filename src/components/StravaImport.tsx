@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { errorMessage } from "../lib/errors";
 import type { StravaProgress } from "../lib/importStrava";
 import { addCells } from "../data/repo";
 
@@ -37,7 +38,7 @@ export function StravaImport({ userId, onClose, onImported }: Props) {
       );
       setStatus("done");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
       setStatus("error");
     }
   }
