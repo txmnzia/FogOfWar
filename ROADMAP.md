@@ -74,8 +74,7 @@ DRIFT_SPEED = 1.4
 
 ### Tools
 
-- **Fog Reveal Studio** (live tuner): [link removed]
-  — sliders map 1:1 to the constants above; copy values → bake into the app.
+- **Fog Reveal Studio** (live tuner, Claude artifact, link removed): sliders map 1:1 to the constants above; copy values → bake into the app.
 
 ### Map polish shipped after WS1
 
